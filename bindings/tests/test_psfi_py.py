@@ -29,15 +29,46 @@ def make_grid_mesh(n):
     return vertices, np.array(cells, dtype=np.int32)
 
 
+def make_interval_mesh(n):
+    vertices = np.linspace(0.0, 1.0, n + 1).reshape(-1, 1)
+    cells = np.column_stack([np.arange(n), np.arange(1, n + 1)]).astype(np.int32)
+    return vertices, cells
+
+
+def make_cube_mesh(n):
+    """Freudenthal triangulation of [0, 1]^3: 6 tets per cube."""
+    import itertools
+    m = n + 1
+    idx = lambda i, j, k: i + m * (j + m * k)
+    vertices = np.zeros((m * m * m, 3))
+    for k in range(m):
+        for j in range(m):
+            for i in range(m):
+                vertices[idx(i, j, k)] = [i / n, j / n, k / n]
+    cells = []
+    for k in range(n):
+        for j in range(n):
+            for i in range(n):
+                for perm in itertools.permutations(range(3)):
+                    p = np.array([i, j, k])
+                    tet = [idx(*p)]
+                    for axis in perm:
+                        p[axis] += 1
+                        tet.append(idx(*p))
+                    cells.append(tet)
+    return vertices, np.array(cells, dtype=np.int32)
+
+
 # ----------------------------------------------------------------------
 #  Pure-numpy reference implementation
 # ----------------------------------------------------------------------
 
 def locate(vertices, cells, p, tol=1e-12):
     """Brute-force point location: containing cell and barycentric coords."""
+    nvert = cells.shape[1]  # d + 1
     for c in range(cells.shape[0]):
-        V = vertices[cells[c]]  # (3, 2)
-        A = np.vstack([np.ones(3), V.T])
+        V = vertices[cells[c]]  # (d+1, d)
+        A = np.vstack([np.ones(nvert), V.T])
         b = np.concatenate([[1.0], p])
         alpha = np.linalg.solve(A, b)
         if np.all(alpha >= -tol):
@@ -58,9 +89,10 @@ def sym_inv_sqrt(S):
 def reference_predictions(data, y, x, cfg):
     """Reference for ImpulseResponseField.predictions; data is a plain dict."""
     Frame, Scaling, Support = psfi.Frame, psfi.Scaling, psfi.Support
+    dim = data["vertices"].shape[1]
     m = data["sample_points"].shape[0]
     if m == 0:
-        return np.array([], int), np.zeros((0, 2)), np.array([])
+        return np.array([], int), np.zeros((0, dim)), np.array([])
 
     need_mu_x = cfg.frame in (Frame.mean_translation, Frame.whitened_affine)
     need_Sig_x = (cfg.frame == Frame.whitened_affine) or (cfg.scaling == Scaling.volume_det)
@@ -70,7 +102,7 @@ def reference_predictions(data, y, x, cfg):
     if need_mu_x or need_Sig_x or need_V_x:
         c, alpha = locate(data["vertices"], data["cells"], x)
         if c < 0:
-            return np.array([], int), np.zeros((0, 2)), np.array([])
+            return np.array([], int), np.zeros((0, dim)), np.array([])
         vids = data["cells"][c]
         if need_V_x:
             V_x = alpha @ data["field_V"][vids]
@@ -136,21 +168,26 @@ def reference_predictions(data, y, x, cfg):
         idx.append(i)
         pts.append(xi)
         vals.append(s * raw)
-    return np.array(idx, int), np.array(pts).reshape(len(idx), 2), np.array(vals)
+    return np.array(idx, int), np.array(pts).reshape(len(idx), dim), np.array(vals)
 
 
 # ----------------------------------------------------------------------
 #  Test data
 # ----------------------------------------------------------------------
 
-def random_spd_stack(rng, n, scale=0.05, floor=0.01):
-    W = rng.standard_normal((n, 2, 2)) * scale
-    return np.einsum("nij,nkj->nik", W, W) + floor * np.eye(2)
+def random_spd_stack(rng, n, scale=0.05, floor=0.01, dim=2):
+    W = rng.standard_normal((n, dim, dim)) * scale
+    return np.einsum("nij,nkj->nik", W, W) + floor * np.eye(dim)
 
 
-def build_field(seed=0, normalized=True, with_moments=True, with_fields=True, n=6):
+def build_field(seed=0, normalized=True, with_moments=True, with_fields=True, n=6, dim=2):
     rng = np.random.default_rng(seed)
-    vertices, cells = make_grid_mesh(n)
+    if dim == 1:
+        vertices, cells = make_interval_mesh(n)
+    elif dim == 2:
+        vertices, cells = make_grid_mesh(n)
+    else:
+        vertices, cells = make_cube_mesh(n)
     nv = vertices.shape[0]
 
     F = psfi.ImpulseResponseField(vertices, cells, batches_normalized=normalized)
@@ -158,10 +195,10 @@ def build_field(seed=0, normalized=True, with_moments=True, with_fields=True, n=
         "vertices": vertices,
         "cells": cells,
         "batches_normalized": normalized,
-        "sample_points": np.zeros((0, 2)),
+        "sample_points": np.zeros((0, dim)),
         "sample_V": np.array([]),
-        "sample_mu": np.zeros((0, 2)),
-        "sample_Sigma": np.zeros((0, 2, 2)),
+        "sample_mu": np.zeros((0, dim)),
+        "sample_Sigma": np.zeros((0, dim, dim)),
         "point2batch": np.array([], int),
         "batch_psi": [],
         "field_V": None,
@@ -171,24 +208,24 @@ def build_field(seed=0, normalized=True, with_moments=True, with_fields=True, n=
 
     if with_fields:
         field_V = 1.0 + rng.uniform(0.5, 1.5, nv)
-        field_mu = vertices + rng.uniform(-0.03, 0.03, (nv, 2))
-        field_Sigma = random_spd_stack(rng, nv)
+        field_mu = vertices + rng.uniform(-0.03, 0.03, (nv, dim))
+        field_Sigma = random_spd_stack(rng, nv, dim=dim)
         F.set_moment_fields(field_V, field_mu, field_Sigma)
         data.update(field_V=field_V, field_mu=field_mu, field_Sigma=field_Sigma)
 
     for b in range(3):
         nb = int(rng.integers(2, 5))
-        pts = rng.uniform(0.15, 0.85, (nb, 2))
+        pts = rng.uniform(0.15, 0.85, (nb, dim))
         psi = rng.standard_normal(nv)
         if with_moments:
             V = rng.uniform(0.5, 2.0, nb)
-            mu = pts + rng.uniform(-0.02, 0.02, (nb, 2))
-            Sigma = random_spd_stack(rng, nb)
+            mu = pts + rng.uniform(-0.02, 0.02, (nb, dim))
+            Sigma = random_spd_stack(rng, nb, dim=dim)
             F.add_batch(pts, psi, V, mu, Sigma)
         else:
             V = np.full(nb, np.nan)
-            mu = np.full((nb, 2), np.nan)
-            Sigma = np.full((nb, 2, 2), np.nan)
+            mu = np.full((nb, dim), np.nan)
+            Sigma = np.full((nb, dim, dim), np.nan)
             F.add_batch(pts, psi)
         data["sample_points"] = np.vstack([data["sample_points"], pts])
         data["sample_V"] = np.concatenate([data["sample_V"], V])
@@ -237,6 +274,35 @@ def test_predictions_match_reference(frame, scaling, support, normalized):
     assert num_nonempty >= 8  # the comparison actually exercised predictions
     if support == psfi.Support.ellipsoid:
         assert num_gated >= 1  # ... including the gate
+
+
+@pytest.mark.parametrize("dim", [1, 3])
+def test_predictions_match_reference_nd(dim):
+    # The full 48-configuration sweep runs in 2D; here a representative
+    # subset checks that nothing is secretly two-dimensional.
+    F, data = build_field(seed=10 + dim, dim=dim, n=(8 if dim == 1 else 3))
+    combos = [
+        (psfi.Frame.identity, psfi.Scaling.none, psfi.Support.none),
+        (psfi.Frame.translation, psfi.Scaling.none, psfi.Support.ellipsoid),
+        (psfi.Frame.mean_translation, psfi.Scaling.volume, psfi.Support.ellipsoid),
+        (psfi.Frame.whitened_affine, psfi.Scaling.volume_det, psfi.Support.ellipsoid),
+        (psfi.Frame.whitened_affine, psfi.Scaling.volume, psfi.Support.none),
+    ]
+    rng = np.random.default_rng(77)
+    num_nonempty = 0
+    for frame, scaling, support in combos:
+        cfg = psfi.EvalConfig(frame=frame, scaling=scaling, support=support,
+                              tau=2.5, num_neighbors=4)
+        for _ in range(8):
+            x = rng.uniform(0.2, 0.8, dim)
+            y = x + rng.uniform(-0.2, 0.2, dim)
+            got_i, got_p, got_v = F.predictions(y, x, cfg)
+            ref_i, ref_p, ref_v = reference_predictions(data, y, x, cfg)
+            assert np.array_equal(got_i, ref_i)
+            assert np.allclose(got_p, ref_p, atol=1e-14)
+            assert np.allclose(got_v, ref_v, rtol=1e-9, atol=1e-12)
+            num_nonempty += int(len(got_i) > 0)
+    assert num_nonempty >= 20
 
 
 def test_num_neighbors_truncation():
