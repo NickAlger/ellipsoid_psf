@@ -37,6 +37,7 @@
 /// evaluation logic.
 
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -137,10 +138,16 @@ public:
     /// at target points. Pass size-zero arrays for fields you do not have
     /// (validation will say if a configuration needs them). Shapes:
     /// V (num_vertices), mu (dim, num_vertices), Sigma (dim*dim,
-    /// num_vertices) with column v = vec(Sigma at vertex v). Sigma columns
-    /// are symmetrized on evaluation; positive definiteness is NOT checked
-    /// here — target points where the interpolated Sigma(x) fails to be SPD
-    /// yield no predictions (the kernel is treated as uninformed there).
+    /// num_vertices) with column v = vec(Sigma at vertex v).
+    ///
+    /// Sigma columns are symmetrized here and every vertex covariance must be
+    /// strictly positive definite (throws listing the offending vertices
+    /// otherwise, leaving the fields unchanged). Vertex-level validation is
+    /// enough: lambda_min is concave, so every CG1-interpolated Sigma(x) is
+    /// then SPD too. Repair noisy fields beforehand with clamp_spd_field —
+    /// and note that a *near*-singular Sigma passes validation but amplifies
+    /// through Sigma(x)^{-1/2} and det Sigma(x); see moments.hpp for how to
+    /// choose the clamping floor.
     void set_moment_fields( const Eigen::Ref<const Eigen::VectorXd>& V,
                             const Eigen::Ref<const Eigen::MatrixXd>& mu,
                             const Eigen::Ref<const Eigen::MatrixXd>& Sigma )
@@ -161,9 +168,45 @@ public:
             throw std::invalid_argument("psfi::ImpulseResponseField::set_moment_fields: Sigma must have "
                                         "shape (dim*dim, num_vertices) (or be empty)");
         }
+
+        // Symmetrize and validate the covariance field before assigning
+        // anything, so a throw leaves the fields unchanged.
+        Eigen::MatrixXd Sigma_sym = Sigma;
+        if ( Sigma.cols() > 0 )
+        {
+            std::vector<std::pair<int, double>> bad; // (vertex, min eigenvalue)
+            for ( int v = 0; v < nv; ++v )
+            {
+                const Eigen::Map<const Eigen::MatrixXd> S(Sigma.col(v).data(), dim_, dim_);
+                const Eigen::MatrixXd S_sym = 0.5 * ( S + S.transpose() );
+                Sigma_sym.col(v) = Eigen::Map<const Eigen::VectorXd>(S_sym.data(), dim_ * dim_);
+                Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(S_sym);
+                if ( es.info() != Eigen::Success || es.eigenvalues().minCoeff() <= 0.0 )
+                {
+                    bad.emplace_back(v, es.eigenvalues().minCoeff());
+                }
+            }
+            if ( !bad.empty() )
+            {
+                std::ostringstream message;
+                message << "psfi::ImpulseResponseField::set_moment_fields: Sigma is not positive "
+                        << "definite at " << bad.size() << " vertex(es):";
+                for ( size_t ii = 0; ii < bad.size() && ii < 10; ++ii )
+                {
+                    message << " v=" << bad[ii].first << " (min eig " << bad[ii].second << ")";
+                }
+                if ( bad.size() > 10 )
+                {
+                    message << " ... and " << ( bad.size() - 10 ) << " more";
+                }
+                message << ". Clean the field first — see psfi::clamp_spd_field; a floor of the "
+                        << "local mesh spacing squared is a reasonable choice.";
+                throw std::invalid_argument(message.str());
+            }
+        }
         field_V_     = V;
         field_mu_    = mu;
-        field_Sigma_ = Sigma;
+        field_Sigma_ = std::move(Sigma_sym);
     }
 
     /// Adds one impulse response batch: sample points (columns of `points`,
@@ -242,7 +285,8 @@ public:
                 if ( es.info() != Eigen::Success || es.eigenvalues().minCoeff() <= 0.0 )
                 {
                     throw std::invalid_argument("psfi::ImpulseResponseField::add_batch: Sigma["
-                                                + std::to_string(ii) + "] is not positive definite");
+                                                + std::to_string(ii) + "] is not positive definite "
+                                                "(clean sample covariances first; see psfi::clamp_spd)");
                 }
                 Sigma_sym .push_back(std::move(S));
                 Sigma_inv .push_back(es.operatorInverseSqrt() * es.operatorInverseSqrt());
@@ -375,9 +419,11 @@ public:
     /// transported point T_i(y) falls outside the mesh are excluded; gated
     /// samples (T_i(y) inside the mesh but outside E_i) contribute f_i = 0.
     /// Returns no predictions when x lies outside the mesh but the
-    /// configuration needs moment fields at x, or when the interpolated
-    /// Sigma(x) is not positive definite: the kernel is uninformed there and
-    /// evaluates to zero. Thread-safe (const; no caches).
+    /// configuration needs moment fields at x: the kernel is uninformed
+    /// there and evaluates to zero. (A rounding-scale backstop also returns
+    /// empty if the interpolated Sigma(x) fails to be SPD, which validated
+    /// fields cannot trigger except at machine precision.) Thread-safe
+    /// (const; no caches).
     std::vector<Prediction> predictions( const Eigen::Ref<const Eigen::VectorXd>& y,
                                          const Eigen::Ref<const Eigen::VectorXd>& x,
                                          const EvalConfig& config ) const
@@ -436,6 +482,10 @@ public:
             }
             if ( need_Sigma_x )
             {
+                // Columns of field_Sigma_ are symmetric (enforced by
+                // set_moment_fields), so the barycentric combination is
+                // symmetric and SPD (lambda_min concavity); the guard below
+                // is a rounding backstop only.
                 Eigen::MatrixXd Sigma_x = Eigen::MatrixXd::Zero(dim_, dim_);
                 for ( int kk = 0; kk < dim_ + 1; ++kk )
                 {
@@ -443,11 +493,10 @@ public:
                         * Eigen::Map<const Eigen::MatrixXd>(
                               field_Sigma_.col(mesh_.cells()(kk, cell)).data(), dim_, dim_);
                 }
-                Sigma_x = 0.5 * ( Sigma_x + Sigma_x.transpose() ).eval();
                 Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Sigma_x);
                 if ( es.info() != Eigen::Success || es.eigenvalues().minCoeff() <= 0.0 )
                 {
-                    return {}; // no valid shape information at x
+                    return {}; // cannot fire for validated fields, except at rounding scale
                 }
                 det_Sigma_x = es.eigenvalues().prod();
                 if ( config.frame == Frame::whitened_affine )

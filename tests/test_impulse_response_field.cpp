@@ -146,6 +146,55 @@ TEST_CASE("ImpulseResponseField: construction and add_batch validation")
 }
 
 
+TEST_CASE("ImpulseResponseField: Sigma field must be positive definite at every vertex")
+{
+    Eigen::MatrixXd vertices;
+    Eigen::MatrixXi cells;
+    make_grid_mesh(4, vertices, cells);
+    const int nv = static_cast<int>(vertices.cols());
+    ImpulseResponseField F(vertices, cells);
+
+    // A good field with one vertex corrupted by a numerical-error-sized
+    // negative eigenvalue.
+    Eigen::MatrixXd field_Sigma =
+        Eigen::MatrixXd::Identity(2, 2).reshaped(4, 1).replicate(1, nv) * 0.01;
+    const Eigen::MatrixXd corrupted = Eigen::Vector2d(0.01, -1e-9).asDiagonal();
+    field_Sigma.col(7) = Eigen::Map<const Eigen::VectorXd>(corrupted.data(), 4);
+
+    bool threw = false;
+    try
+    {
+        F.set_moment_fields(kNoV, kNoMu, field_Sigma);
+    }
+    catch ( const std::invalid_argument& e )
+    {
+        threw = true;
+        const std::string msg = e.what();
+        CHECK(msg.find("not positive definite") != std::string::npos);
+        CHECK(msg.find("v=7") != std::string::npos);
+        CHECK(msg.find("clamp_spd_field") != std::string::npos);
+    }
+    CHECK(threw);
+    CHECK(!F.has_field_Sigma()); // a failed set leaves the fields unchanged
+
+    // clamp_spd_field repairs it; the cleaned field is accepted.
+    const auto cleaned = clamp_spd_field(field_Sigma, 2, 1e-6);
+    CHECK(cleaned.second == std::vector<int>{7});
+    CHECK_NOTHROW(F.set_moment_fields(kNoV, kNoMu, cleaned.first));
+    CHECK(F.has_field_Sigma());
+
+    // Asymmetric-but-SPD input is symmetrized on storage.
+    Eigen::MatrixXd asym = ( Eigen::Matrix2d() << 0.5, 0.2, 0.0, 0.3 ).finished();
+    Eigen::MatrixXd field_asym =
+        Eigen::Map<const Eigen::VectorXd>(asym.data(), 4).replicate(1, nv);
+    F.set_moment_fields(kNoV, kNoMu, field_asym);
+    const Eigen::MatrixXd stored =
+        Eigen::Map<const Eigen::MatrixXd>(F.field_Sigma().col(0).data(), 2, 2);
+    CHECK(stored(0, 1) == doctest::Approx(0.1));
+    CHECK(stored(1, 0) == doctest::Approx(0.1));
+}
+
+
 TEST_CASE("ImpulseResponseField: validate() reports exactly the missing data")
 {
     Eigen::MatrixXd vertices;

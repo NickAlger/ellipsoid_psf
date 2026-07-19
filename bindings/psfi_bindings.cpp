@@ -80,6 +80,25 @@ Eigen::MatrixXd flat_field_from_stack( const py::array_t<double>& stack, const c
     return out;
 }
 
+// (d*d, n) flat field -> (n, d, d) numpy stack.
+py::array_t<double> stack_from_flat_field( const Eigen::MatrixXd& flat, int d )
+{
+    const int n = static_cast<int>(flat.cols());
+    py::array_t<double> out({n, d, d});
+    auto A = out.mutable_unchecked<3>();
+    for ( int ii = 0; ii < n; ++ii )
+    {
+        for ( int cc = 0; cc < d; ++cc )
+        {
+            for ( int rr = 0; rr < d; ++rr )
+            {
+                A(ii, rr, cc) = flat(rr + cc * d, ii);
+            }
+        }
+    }
+    return out;
+}
+
 // one matrix per entry -> (n, d, d) numpy stack.
 py::array_t<double> stack_from_matrices( const std::vector<Eigen::MatrixXd>& mats, int d )
 {
@@ -347,6 +366,40 @@ PYBIND11_MODULE(psfi, m)
              "values (k,)), nearest sample first; k <= num_neighbors (samples whose\n"
              "transported point leaves the mesh are excluded, and k = 0 when the\n"
              "configuration needs moment fields at an x outside the mesh).");
+
+    // ------------------------------------------------------------------
+    //  Moment-data hygiene
+    // ------------------------------------------------------------------
+
+    const char* clamp_spd_doc =
+        "Symmetrize a covariance stack (n, d, d) and clamp its eigenvalues to at\n"
+        "least `floor` (> 0; scalar or per-entry array of shape (n,)). Returns\n"
+        "(cleaned_stack, modified_indices). psfi requires strictly positive\n"
+        "definite covariances (add_batch and set_moment_fields validate); use this\n"
+        "to repair fields corrupted by numerical error. The floor is a modelling\n"
+        "choice, not just hygiene — near-singular covariances pass validation but\n"
+        "amplify through Sigma(x)^{-1/2} and det Sigma(x); the square of the local\n"
+        "mesh spacing is a reasonable default.";
+    auto clamp_stack = []( const py::array_t<double>& Sigmas, const Eigen::VectorXd& floors )
+    {
+        const Eigen::MatrixXd flat = flat_field_from_stack(Sigmas, "Sigmas");
+        const int d = static_cast<int>(Sigmas.shape(1));
+        std::pair<Eigen::MatrixXd, std::vector<int>> result = clamp_spd_field(flat, d, floors);
+        Eigen::VectorXi modified(static_cast<int>(result.second.size()));
+        for ( int ii = 0; ii < modified.size(); ++ii )
+        {
+            modified(ii) = result.second[ii];
+        }
+        return std::make_pair(stack_from_flat_field(result.first, d), modified);
+    };
+    m.def("clamp_spd",
+          [clamp_stack]( const py::array_t<double>& Sigmas, double floor )
+          {
+              return clamp_stack(Sigmas,
+                                 Eigen::VectorXd::Constant(Sigmas.shape(0), floor));
+          },
+          "Sigmas"_a, "floor"_a, clamp_spd_doc);
+    m.def("clamp_spd", clamp_stack, "Sigmas"_a, "floor"_a, clamp_spd_doc);
 
     // ------------------------------------------------------------------
     //  RBF interpolation

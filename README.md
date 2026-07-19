@@ -61,6 +61,19 @@ single-impulse batches), while `whitened_affine` + `volume_det` needs all
 per-sample moments and all vertex moment fields.
 `ImpulseResponseField.validate(config)` lists exactly what is missing.
 
+**Covariances must be strictly positive definite**, and this is enforced at
+data entry (`add_batch` for per-sample Σ_i, `set_moment_fields` for the
+vertex Σ field). Vertex-level validation is enough for the whole domain:
+λ_min is concave, so every CG1-interpolated Σ(x) inherits positive
+definiteness from the cell's vertices. Fields corrupted by numerical error
+are repaired with `psfi.clamp_spd` (eigenvalue flooring; scalar or
+per-vertex floors). Choosing the floor is a modelling decision, not just
+hygiene — a *near*-singular Σ passes validation but amplifies through
+Σ(x)^{−1/2} and det Σ(x); the square of the local mesh spacing is a
+reasonable default (an impulse response can't be resolved below the mesh
+scale anyway), and genuinely uninformative regions belong to the V field,
+which drives the kernel to zero continuously under the `volume` scalings.
+
 ## Quick look (Python)
 
 ```python
