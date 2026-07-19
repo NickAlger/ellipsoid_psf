@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: MIT
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Eigen
+        run: sudo apt-get update && sudo apt-get install -y libeigen3-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+      - name: Build
+        run: cmake --build build -j $(nproc)
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  pip-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No apt Eigen on purpose: exercises the FetchContent fallbacks (etree,
+      # and Eigen inside etree) within a pip build.
+      - name: Build wheel
+        run: python3 -m pip wheel . --no-deps -w dist
+      - name: Install and test
+        run: |
+          python3 -m pip install numpy pytest dist/*.whl
+          python3 -m pytest bindings/tests -q
+
+  python-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libeigen3-dev python3-dev
+          python3 -m pip install numpy pytest
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPSFI_BUILD_PYTHON=ON
+          -DPSFI_BUILD_TESTS=OFF
+      - name: Build
+        run: cmake --build build -j $(nproc) --target psfi_python
+      - name: Test
+        run: PYTHONPATH=build/bindings python3 -m pytest bindings/tests -q
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [thread, "address,undefined"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Eigen
+        run: sudo apt-get update && sudo apt-get install -y libeigen3-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer"
+      - name: Build
+        # Sanitizer TUs are the most memory-hungry; cap harder to avoid OOM on the runner.
+        run: cmake --build build -j 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  version-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: psfi.hpp version matches pyproject.toml
+        run: |
+          python3 - <<'PY'
+          import re, sys, tomllib
+          hpp = open("include/psfi/psfi.hpp").read()
+          def macro(tag): return re.search(rf"PSFI_VERSION_{tag} (\d+)", hpp).group(1)
+          header = f"{macro('MAJOR')}.{macro('MINOR')}.{macro('PATCH')}"
+          pyproj = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          print(f"psfi.hpp={header}  pyproject.toml={pyproj}")
+          if pyproj != header:
+              sys.exit(f"version mismatch: psfi.hpp={header}, pyproject.toml={pyproj}")
+          print("versions consistent")
+          PY
