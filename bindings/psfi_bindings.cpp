@@ -9,6 +9,7 @@
 
 #include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <pybind11/pybind11.h>
@@ -230,18 +231,41 @@ PYBIND11_MODULE(psfi, m)
     py::class_<ImpulseResponseField, std::shared_ptr<ImpulseResponseField>>(m, "ImpulseResponseField",
         "Batches of sampled impulse responses on a simplicial mesh; produces\n"
         "per-neighbor kernel predictions for arbitrary target pairs (y, x).\n\n"
-        "vertices: (num_vertices, d); cells: (num_cells, d+1).\n"
+        "vertices: (num_vertices, d); cells: (num_cells, d+1) — the TARGET mesh,\n"
+        "carrying the batch functions. Optionally pass source_vertices/source_cells\n"
+        "for a separate SOURCE mesh carrying the moment fields and locating the\n"
+        "query point x (its dimension may differ; see the moment-map discussion in\n"
+        "the C++ docs). By default source = target.\n"
         "batches_normalized=True means each stored batch is sum_i phi_i / V_i\n"
         "(the paper's convention); False means batches store raw impulse responses.")
         .def(py::init([]( const RowsXd& vertices, const RowsXi& cells,
-                          bool batches_normalized, int num_threads )
+                          bool batches_normalized, int num_threads,
+                          std::optional<Eigen::MatrixXd> source_vertices,
+                          std::optional<Eigen::MatrixXi> source_cells )
              {
+                 if ( source_vertices.has_value() != source_cells.has_value() )
+                 {
+                     throw std::invalid_argument("provide both source_vertices and source_cells, "
+                                                 "or neither");
+                 }
+                 if ( source_vertices )
+                 {
+                     return ImpulseResponseField(
+                         cols_from_rows(vertices), icols_from_rows(cells),
+                         source_vertices->transpose(), source_cells->transpose(),
+                         batches_normalized, num_threads);
+                 }
                  return ImpulseResponseField(cols_from_rows(vertices), icols_from_rows(cells),
                                              batches_normalized, num_threads);
              }),
-             "vertices"_a, "cells"_a, "batches_normalized"_a = true, "num_threads"_a = 0)
-        .def_property_readonly("dim", &ImpulseResponseField::dim)
-        .def_property_readonly("num_vertices", &ImpulseResponseField::num_vertices)
+             "vertices"_a, "cells"_a, "batches_normalized"_a = true, "num_threads"_a = 0,
+             "source_vertices"_a = py::none(), "source_cells"_a = py::none())
+        .def_property_readonly("dim_source", &ImpulseResponseField::dim_source)
+        .def_property_readonly("dim_target", &ImpulseResponseField::dim_target)
+        .def_property_readonly("num_source_vertices", &ImpulseResponseField::num_source_vertices)
+        .def_property_readonly("num_target_vertices", &ImpulseResponseField::num_target_vertices)
+        .def_property_readonly("has_separate_source_mesh",
+                               &ImpulseResponseField::has_separate_source_mesh)
         .def_property_readonly("num_batches", &ImpulseResponseField::num_batches)
         .def_property_readonly("num_sample_points", &ImpulseResponseField::num_sample_points)
         .def_property_readonly("batches_normalized", &ImpulseResponseField::batches_normalized)
@@ -251,14 +275,22 @@ PYBIND11_MODULE(psfi, m)
         .def_property_readonly("has_field_V", &ImpulseResponseField::has_field_V)
         .def_property_readonly("has_field_mu", &ImpulseResponseField::has_field_mu)
         .def_property_readonly("has_field_Sigma", &ImpulseResponseField::has_field_Sigma)
-        .def_property_readonly("mesh_vertices",
+        .def_property_readonly("target_mesh_vertices",
              []( const ImpulseResponseField& F )
-             { return Eigen::MatrixXd(F.mesh().vertices().transpose()); },
-             "Mesh vertex coordinates, shape (num_vertices, d).")
-        .def_property_readonly("mesh_cells",
+             { return Eigen::MatrixXd(F.target_mesh().vertices().transpose()); },
+             "Target-mesh vertex coordinates, shape (num_target_vertices, dim_target).")
+        .def_property_readonly("target_mesh_cells",
              []( const ImpulseResponseField& F )
-             { return Eigen::MatrixXi(F.mesh().cells().transpose()); },
-             "Mesh cell vertex indices, shape (num_cells, d+1).")
+             { return Eigen::MatrixXi(F.target_mesh().cells().transpose()); },
+             "Target-mesh cell vertex indices, shape (num_cells, dim_target+1).")
+        .def_property_readonly("source_mesh_vertices",
+             []( const ImpulseResponseField& F )
+             { return Eigen::MatrixXd(F.source_mesh().vertices().transpose()); },
+             "Source-mesh vertex coordinates (the target mesh's in the square case).")
+        .def_property_readonly("source_mesh_cells",
+             []( const ImpulseResponseField& F )
+             { return Eigen::MatrixXi(F.source_mesh().cells().transpose()); },
+             "Source-mesh cell vertex indices (the target mesh's in the square case).")
         .def_property_readonly("sample_points",
              []( const ImpulseResponseField& F )
              { return Eigen::MatrixXd(F.sample_points().transpose()); },
@@ -275,7 +307,7 @@ PYBIND11_MODULE(psfi, m)
              []( const ImpulseResponseField& F )
              {
                  const auto& mu = F.sample_mu();
-                 Eigen::MatrixXd out(static_cast<int>(mu.size()), F.dim());
+                 Eigen::MatrixXd out(static_cast<int>(mu.size()), F.dim_target());
                  for ( int ii = 0; ii < static_cast<int>(mu.size()); ++ii )
                  {
                      out.row(ii) = mu[ii].transpose();
@@ -285,7 +317,7 @@ PYBIND11_MODULE(psfi, m)
              "Per-sample means mu_i, shape (num_sample_points, d); empty if absent.")
         .def_property_readonly("sample_Sigma",
              []( const ImpulseResponseField& F )
-             { return stack_from_matrices(F.sample_Sigma(), F.dim()); },
+             { return stack_from_matrices(F.sample_Sigma(), F.dim_target()); },
              "Per-sample covariances Sigma_i (symmetrized), shape (num_sample_points, d, d); "
              "empty if absent.")
         .def_property_readonly("point2batch",
@@ -350,7 +382,7 @@ PYBIND11_MODULE(psfi, m)
                  const std::vector<Prediction> P = F.predictions(y, x, config);
                  const int k = static_cast<int>(P.size());
                  Eigen::VectorXi indices(k);
-                 Eigen::MatrixXd points(k, F.dim());
+                 Eigen::MatrixXd points(k, F.dim_source());
                  Eigen::VectorXd values(k);
                  for ( int jj = 0; jj < k; ++jj )
                  {
@@ -486,7 +518,8 @@ PYBIND11_MODULE(psfi, m)
              "rbf"_a = RBFScheme{}, "duplicate_tol"_a = 1e-7,
              "Validates the fields against the configuration here: construction\n"
              "succeeds iff evaluation can run.")
-        .def_property_readonly("dim", &KernelEvaluator::dim)
+        .def_property_readonly("dim_source", &KernelEvaluator::dim_source)
+        .def_property_readonly("dim_target", &KernelEvaluator::dim_target)
         .def_property_readonly("symmetric", &KernelEvaluator::symmetric)
         .def_property_readonly("duplicate_tol", &KernelEvaluator::duplicate_tol)
         .def_property_readonly("config", []( const KernelEvaluator& K ) { return K.config(); })

@@ -93,8 +93,10 @@ TEST_CASE("ImpulseResponseField: construction and add_batch validation")
     const Eigen::VectorXd psi = affine_vertex_values(1.0, 0.0, 0.0, vertices);
 
     ImpulseResponseField F(vertices, cells);
-    CHECK(F.dim() == 2);
-    CHECK(F.num_vertices() == 25);
+    CHECK(F.dim_source() == 2);
+    CHECK(F.dim_target() == 2);
+    CHECK(F.num_target_vertices() == 25);
+    CHECK(F.num_source_vertices() == 25);
     CHECK(F.num_batches() == 0);
     CHECK(F.num_sample_points() == 0);
     CHECK(F.batches_normalized());
@@ -137,10 +139,10 @@ TEST_CASE("ImpulseResponseField: construction and add_batch validation")
 
     // Moment field shape validation.
     CHECK_THROWS_AS(F.set_moment_fields(bad_V, kNoMu, kNoMu), std::invalid_argument);
-    Eigen::MatrixXd bad_field_mu(3, F.num_vertices());
+    Eigen::MatrixXd bad_field_mu(3, F.num_source_vertices());
     bad_field_mu.setZero();
     CHECK_THROWS_AS(F.set_moment_fields(kNoV, bad_field_mu, kNoMu), std::invalid_argument);
-    Eigen::MatrixXd bad_field_Sigma(3, F.num_vertices());
+    Eigen::MatrixXd bad_field_Sigma(3, F.num_source_vertices());
     bad_field_Sigma.setZero();
     CHECK_THROWS_AS(F.set_moment_fields(kNoV, kNoMu, bad_field_Sigma), std::invalid_argument);
 }

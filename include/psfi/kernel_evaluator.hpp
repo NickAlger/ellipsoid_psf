@@ -63,10 +63,17 @@ public:
         col_field_->validate(config_);
         if ( row_field_ )
         {
-            if ( row_field_->dim() != col_field_->dim() )
+            // Symmetric mode pools forward centers x_i - x (source space)
+            // with adjoint centers x_j - y (target space); that presumes an
+            // identification of the two spaces, so all dimensions must agree.
+            if ( row_field_->dim_source() != col_field_->dim_source()
+                 || row_field_->dim_target() != col_field_->dim_target()
+                 || col_field_->dim_source() != col_field_->dim_target() )
             {
-                throw std::invalid_argument("psfi::KernelEvaluator: col_field and row_field must "
-                                            "have the same spatial dimension");
+                throw std::invalid_argument("psfi::KernelEvaluator: symmetric mode requires equal "
+                                            "source and target dimensions across both fields (the "
+                                            "forward/adjoint center pooling identifies the two "
+                                            "spaces); use cols-only mode for rectangular kernels");
             }
             row_field_->validate(config_);
         }
@@ -82,7 +89,10 @@ public:
     const RBFScheme&  rbf() const     { return rbf_; }
     double duplicate_tol() const      { return duplicate_tol_; }
     bool   symmetric() const          { return static_cast<bool>(row_field_); }
-    int    dim() const                { return col_field_->dim(); }
+    /// Source-domain dimension (of x and the interpolation centers).
+    int    dim_source() const         { return col_field_->dim_source(); }
+    /// Target-domain dimension (of y).
+    int    dim_target() const         { return col_field_->dim_target(); }
 
     /// The approximate kernel entry Phi(y, x); zero where there are no
     /// predictions (no samples in reach, or x uninformed). Thread-safe.
@@ -148,26 +158,27 @@ public:
         {
             return 0.0;
         }
-        Eigen::MatrixXd C(dim(), k);
+        Eigen::MatrixXd C(dim_source(), k);
         Eigen::VectorXd f(k);
         for ( int jj = 0; jj < k; ++jj )
         {
             C.col(jj) = centers[jj];
             f(jj) = values[jj];
         }
-        return rbf_interpolate(f, C, Eigen::MatrixXd::Zero(dim(), 1), rbf_)(0);
+        return rbf_interpolate(f, C, Eigen::MatrixXd::Zero(dim_source(), 1), rbf_)(0);
     }
 
     /// The block of kernel entries [ Phi(yy.col(ii), xx.col(jj)) ]_{ii,jj},
     /// shape (num_y, num_x), evaluated in parallel (num_threads <= 0 uses all
     /// hardware threads).
-    Eigen::MatrixXd block( const Eigen::Ref<const Eigen::MatrixXd>& yy, // (dim, num_y)
-                           const Eigen::Ref<const Eigen::MatrixXd>& xx, // (dim, num_x)
+    Eigen::MatrixXd block( const Eigen::Ref<const Eigen::MatrixXd>& yy, // (dim_target, num_y)
+                           const Eigen::Ref<const Eigen::MatrixXd>& xx, // (dim_source, num_x)
                            int num_threads = 0 ) const
     {
-        if ( yy.rows() != dim() || xx.rows() != dim() )
+        if ( yy.rows() != dim_target() || xx.rows() != dim_source() )
         {
-            throw std::invalid_argument("psfi::KernelEvaluator::block: yy and xx must have dim rows");
+            throw std::invalid_argument("psfi::KernelEvaluator::block: yy must have dim_target rows "
+                                        "and xx dim_source rows");
         }
         const int ny = static_cast<int>(yy.cols());
         const int nx = static_cast<int>(xx.cols());

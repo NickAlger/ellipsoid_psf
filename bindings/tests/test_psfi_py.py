@@ -432,7 +432,8 @@ def test_x_outside_mesh():
 
 def test_introspection_roundtrip():
     F, data = build_field(seed=3)
-    assert F.dim == 2
+    assert F.dim_source == 2 and F.dim_target == 2
+    assert not F.has_separate_source_mesh
     assert F.num_batches == 3
     assert F.num_sample_points == data["sample_points"].shape[0]
     assert F.batches_normalized
@@ -449,8 +450,9 @@ def test_introspection_roundtrip():
         assert np.all(data["point2batch"][start:stop] == b)
         assert np.allclose(F.batch_values(b), data["batch_psi"][b])
 
-    assert np.allclose(F.mesh_vertices, data["vertices"])
-    assert np.array_equal(F.mesh_cells, data["cells"])
+    assert np.allclose(F.target_mesh_vertices, data["vertices"])
+    assert np.array_equal(F.target_mesh_cells, data["cells"])
+    assert np.allclose(F.source_mesh_vertices, data["vertices"])  # square case
 
     assert isinstance(psfi.__version__, str)
     r = repr(psfi.EvalConfig())

@@ -257,7 +257,7 @@ int main()
         }
         Plot2D fig;
         FieldOptions opts;
-        draw_cg1_field(fig, F->mesh(), true_psf[tt], opts);
+        draw_cg1_field(fig, F->target_mesh(), true_psf[tt], opts);
         fig.add_marker(targets[tt], 4.0, target_style);
         char path[64];
         std::snprintf(path, sizeof(path), "%02zu_true_psf_target%zu.png", 7 + 3 * tt, tt + 1);
@@ -315,7 +315,7 @@ int main()
         if ( b < 5 )
         {
             Plot2D fig;
-            draw_cg1_field(fig, F->mesh(), psi);
+            draw_cg1_field(fig, F->target_mesh(), psi);
             for ( int ii = 0; ii < nb; ++ii )
             {
                 fig.add(Ellipsoid{mu.col(ii), Sigma[ii]}, tau, ellipse_style);
@@ -351,7 +351,7 @@ int main()
                 FieldOptions opts;
                 opts.vmin = true_psf[tt].minCoeff(); // shared scale with the true PSF
                 opts.vmax = true_psf[tt].maxCoeff();
-                draw_cg1_field(fig, F->mesh(), psf.col(tt), opts);
+                draw_cg1_field(fig, F->target_mesh(), psf.col(tt), opts);
                 fig.add_marker(targets[tt], 4.0, target_style);
                 char path[64];
                 std::snprintf(path, sizeof(path), "%02zu_psf_target%zu_batches%d.png",
@@ -390,7 +390,7 @@ int main()
                 FieldOptions opts;
                 opts.vmin = 0.0;
                 opts.vmax = 1.0;
-                draw_cg1_field(fig, F->mesh(), err, opts);
+                draw_cg1_field(fig, F->target_mesh(), err, opts);
                 char path[64];
                 std::snprintf(path, sizeof(path), "%2zu_error_%s_batches%02d_k%02d.png",
                               13 + qq, ( qq == 0 ? "paper" : "whitened" ), stage, num_neighbors);

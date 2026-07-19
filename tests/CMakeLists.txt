@@ -3,6 +3,7 @@ add_executable(psfi_tests
     test_main.cpp
     test_impulse_response_field.cpp
     test_dimensions.cpp
+    test_source_target.cpp
     test_moments.cpp
     test_rbf.cpp
     test_kernel_evaluator.cpp)

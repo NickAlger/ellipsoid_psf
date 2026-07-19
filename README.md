@@ -76,6 +76,16 @@ single-impulse batches), while `whitened_affine` + `volume_det` needs all
 per-sample moments and all vertex moment fields.
 `ImpulseResponseField.validate(config)` lists exactly what is missing.
 
+**Different source and target domains are supported**, including different
+dimensions: the field optionally takes a second mesh, the *source* mesh,
+carrying the moment fields and locating the query point x, while the *target*
+mesh carries the impulse responses. The moment map μ : Ω_src → Ω_tgt sends
+each source point to where its impulse response lands, which is what makes
+`mean_translation` and `whitened_affine` well-typed across domains (paper
+§4.2); `translation` requires equal dimensions, and symmetric evaluation
+requires the single-domain case. By default source = target and nothing
+distinguishes the two roles.
+
 **Covariances must be strictly positive definite**, and this is enforced at
 data entry (`add_batch` for per-sample Σ_i, `set_moment_fields` for the
 vertex Σ field). Vertex-level validation is enough for the whole domain:

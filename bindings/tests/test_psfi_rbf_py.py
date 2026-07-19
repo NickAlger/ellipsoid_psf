@@ -158,5 +158,5 @@ def test_kernel_evaluator_api():
     # Config and scheme are inspectable.
     assert K.config.num_neighbors == 5
     assert K.rbf.degree == 1
-    assert K.dim == 2
+    assert K.dim_source == 2 and K.dim_target == 2
     assert not K.symmetric
