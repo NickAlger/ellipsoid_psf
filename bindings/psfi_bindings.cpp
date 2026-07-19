@@ -132,6 +132,20 @@ const char* support_name( Support s )
     return "?";
 }
 
+const char* kernel_name( RBFKernel k )
+{
+    switch ( k )
+    {
+        case RBFKernel::gaussian:             return "gaussian";
+        case RBFKernel::multiquadric:         return "multiquadric";
+        case RBFKernel::inverse_multiquadric: return "inverse_multiquadric";
+        case RBFKernel::linear:               return "linear";
+        case RBFKernel::thin_plate_spline:    return "thin_plate_spline";
+        case RBFKernel::cubic:                return "cubic";
+    }
+    return "?";
+}
+
 } // end anonymous namespace
 
 PYBIND11_MODULE(psfi, m)
@@ -194,7 +208,7 @@ PYBIND11_MODULE(psfi, m)
                      + ", num_neighbors=" + std::to_string(c.num_neighbors) + ")";
              });
 
-    py::class_<ImpulseResponseField>(m, "ImpulseResponseField",
+    py::class_<ImpulseResponseField, std::shared_ptr<ImpulseResponseField>>(m, "ImpulseResponseField",
         "Batches of sampled impulse responses on a simplicial mesh; produces\n"
         "per-neighbor kernel predictions for arbitrary target pairs (y, x).\n\n"
         "vertices: (num_vertices, d); cells: (num_cells, d+1).\n"
@@ -333,4 +347,109 @@ PYBIND11_MODULE(psfi, m)
              "values (k,)), nearest sample first; k <= num_neighbors (samples whose\n"
              "transported point leaves the mesh are excluded, and k = 0 when the\n"
              "configuration needs moment fields at an x outside the mesh).");
+
+    // ------------------------------------------------------------------
+    //  RBF interpolation
+    // ------------------------------------------------------------------
+
+    py::enum_<RBFKernel>(m, "RBFKernel",
+        "Radial kernel phi(u) at the locally scaled distance u = shape * r / r0\n"
+        "(r0 = diameter of the interpolation point set, recomputed per call).\n"
+        "Sign conventions follow scipy.interpolate.RBFInterpolator.")
+        .value("gaussian", RBFKernel::gaussian, "exp(-u^2/2)")
+        .value("multiquadric", RBFKernel::multiquadric, "-sqrt(1 + u^2)")
+        .value("inverse_multiquadric", RBFKernel::inverse_multiquadric, "1/sqrt(1 + u^2)")
+        .value("linear", RBFKernel::linear, "-u")
+        .value("thin_plate_spline", RBFKernel::thin_plate_spline, "u^2 log u")
+        .value("cubic", RBFKernel::cubic, "u^3");
+
+    py::class_<RBFScheme>(m, "RBFScheme",
+        "RBF interpolation configuration: kernel, shape (the paper's C_RBF),\n"
+        "polynomial-tail degree (-1 none, 0 constant, 1 linear), ridge smoothing.\n"
+        "With smoothing = 0 the interpolant reproduces its data at the centers;\n"
+        "smoothing has no effect when there are no more centers than tail\n"
+        "coefficients (the system degenerates to polynomial interpolation).")
+        .def(py::init([]( RBFKernel kernel, double shape, int degree, double smoothing )
+             {
+                 RBFScheme s;
+                 s.kernel = kernel;
+                 s.shape = shape;
+                 s.degree = degree;
+                 s.smoothing = smoothing;
+                 validate(s);
+                 return s;
+             }),
+             "kernel"_a = RBFKernel::gaussian, "shape"_a = 3.0, "degree"_a = 1, "smoothing"_a = 0.0)
+        .def_readwrite("kernel", &RBFScheme::kernel)
+        .def_readwrite("shape", &RBFScheme::shape)
+        .def_readwrite("degree", &RBFScheme::degree)
+        .def_readwrite("smoothing", &RBFScheme::smoothing)
+        .def("__repr__", []( const RBFScheme& s )
+             {
+                 return std::string("RBFScheme(kernel=") + kernel_name(s.kernel)
+                     + ", shape=" + std::to_string(s.shape)
+                     + ", degree=" + std::to_string(s.degree)
+                     + ", smoothing=" + std::to_string(s.smoothing) + ")";
+             });
+
+    m.def("rbf_min_degree", &rbf_min_degree, "kernel"_a,
+          "Smallest polynomial-tail degree guaranteeing solvability for this kernel.");
+
+    m.def("rbf_interpolate",
+          []( const Eigen::VectorXd& values, const RowsXd& centers, const RowsXd& eval_points,
+              const RBFScheme& scheme )
+          {
+              return rbf_interpolate(values, cols_from_rows(centers).eval(),
+                                     cols_from_rows(eval_points).eval(), scheme);
+          },
+          "values"_a, "centers"_a, "eval_points"_a, "scheme"_a = RBFScheme{},
+          py::call_guard<py::gil_scoped_release>(),
+          "RBF interpolant of {(centers[i], values[i])} evaluated at eval_points.\n"
+          "values: (k,); centers: (k, d); eval_points: (m, d). Returns (m,).\n"
+          "One center (or all coincident) gives a constant; the tail degree is\n"
+          "lowered automatically when there are fewer centers than coefficients.");
+
+    // ------------------------------------------------------------------
+    //  Kernel evaluator
+    // ------------------------------------------------------------------
+
+    py::class_<KernelEvaluator>(m, "KernelEvaluator",
+        "The complete kernel approximation Phi(y, x): RBF combination of\n"
+        "per-neighbor predictions. Cols-only with one field, symmetric with a\n"
+        "row field probed with the transpose operator (pass the same field\n"
+        "twice for a symmetric operator probed once); in symmetric mode the\n"
+        "forward and adjoint prediction sets are pooled in displacement\n"
+        "coordinates and near-duplicate centers are averaged. Entries at\n"
+        "sample columns are exact when smoothing = 0 (center reproduction —\n"
+        "no snapping special case).")
+        .def(py::init([]( std::shared_ptr<const ImpulseResponseField> col_field,
+                          std::shared_ptr<const ImpulseResponseField> row_field,
+                          const EvalConfig& config, const RBFScheme& rbf, double duplicate_tol )
+             {
+                 return KernelEvaluator(std::move(col_field), std::move(row_field),
+                                        config, rbf, duplicate_tol);
+             }),
+             "col_field"_a, "row_field"_a = nullptr, "config"_a = EvalConfig{},
+             "rbf"_a = RBFScheme{}, "duplicate_tol"_a = 1e-7,
+             "Validates the fields against the configuration here: construction\n"
+             "succeeds iff evaluation can run.")
+        .def_property_readonly("dim", &KernelEvaluator::dim)
+        .def_property_readonly("symmetric", &KernelEvaluator::symmetric)
+        .def_property_readonly("duplicate_tol", &KernelEvaluator::duplicate_tol)
+        .def_property_readonly("config", []( const KernelEvaluator& K ) { return K.config(); })
+        .def_property_readonly("rbf", []( const KernelEvaluator& K ) { return K.rbf(); })
+        .def("__call__",
+             []( const KernelEvaluator& K, const Eigen::VectorXd& y, const Eigen::VectorXd& x )
+             { return K(y, x); },
+             "y"_a, "x"_a, py::call_guard<py::gil_scoped_release>(),
+             "The approximate kernel entry Phi(y, x); zero where there are no predictions.")
+        .def("block",
+             []( const KernelEvaluator& K, const RowsXd& yy, const RowsXd& xx, int num_threads )
+             {
+                 return Eigen::MatrixXd(K.block(cols_from_rows(yy).eval(),
+                                                cols_from_rows(xx).eval(), num_threads));
+             },
+             "yy"_a, "xx"_a, "num_threads"_a = 0, py::call_guard<py::gil_scoped_release>(),
+             "Block [Phi(yy[i], xx[j])]_{ij} of shape (num_y, num_x), evaluated in\n"
+             "parallel; yy: (num_y, d), xx: (num_x, d). num_threads <= 0 uses all cores.");
 }

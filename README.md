@@ -7,11 +7,13 @@ PSF method of [Alger, Hartland, Petra, Ghattas, SISC 2024](https://doi.org/10.11
 Header-only C++17 with Python bindings; depends on Eigen and
 [etree](https://github.com/NickAlger/ellipsoid_tree).
 
-> **Status: work in progress.** The impulse-response container and the
-> per-neighbor prediction machinery (all frame maps and scalings, with
-> data-requirement validation) are implemented and tested; the RBF
-> interpolation layer and the block kernel evaluator are landing next.
-> Not yet published to PyPI.
+> **Status: work in progress.** The full evaluation pipeline is implemented
+> and tested: the impulse-response container, the per-neighbor prediction
+> machinery (all frame maps and scalings, with data-requirement validation),
+> the RBF layer (six kernels, polynomial tails, ridge smoothing;
+> cross-checked against scipy's `RBFInterpolator`), and the threaded
+> `KernelEvaluator` (cols-only and symmetric). Examples, docs, and the PyPI
+> release are still to come.
 
 ## The idea
 
@@ -72,6 +74,11 @@ cfg = psfi.EvalConfig(frame=psfi.Frame.whitened_affine,
                       scaling=psfi.Scaling.volume_det,
                       tau=3.0, num_neighbors=10)
 indices, points, values = F.predictions(y, x, cfg)   # per-neighbor predictions at (y, x)
+
+K = psfi.KernelEvaluator(F, config=cfg,
+                         rbf=psfi.RBFScheme(kernel=psfi.RBFKernel.gaussian, shape=3.0))
+value = K(y, x)         # one kernel entry
+B = K.block(yy, xx)     # (num_y, num_x) block, threaded
 ```
 
 ## Building and testing
