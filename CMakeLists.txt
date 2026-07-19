@@ -45,13 +45,19 @@ target_link_libraries(psfi INTERFACE etree::etree)
 
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     option(PSFI_BUILD_TESTS "Build psfi tests" ON)
+    option(PSFI_BUILD_EXAMPLES "Build psfi examples" ON)
 else()
     option(PSFI_BUILD_TESTS "Build psfi tests" OFF)
+    option(PSFI_BUILD_EXAMPLES "Build psfi examples" OFF)
 endif()
 
 if(PSFI_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(PSFI_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 option(PSFI_BUILD_PYTHON "Build the psfi Python bindings (pybind11 via FetchContent)" OFF)

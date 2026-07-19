@@ -12,8 +12,23 @@ Header-only C++17 with Python bindings; depends on Eigen and
 > machinery (all frame maps and scalings, with data-requirement validation),
 > the RBF layer (six kernels, polynomial tails, ridge smoothing;
 > cross-checked against scipy's `RBFInterpolator`), and the threaded
-> `KernelEvaluator` (cols-only and symmetric). Examples, docs, and the PyPI
-> release are still to come.
+> `KernelEvaluator` (cols-only and symmetric), with an end-to-end worked
+> example. API docs and the PyPI release are still to come.
+
+<p align="center">
+<img src="docs/img/frog_kernel__01_batch_1.png" width="480">
+</p>
+
+*One impulse response batch of the "frog" kernel with its support ellipsoids
+and two evaluation targets (red), from the
+[end-to-end example](docs/examples/frog_kernel.md): support ellipsoids from
+a-priori moments → non-overlapping batch picking (etree) → impulse response
+batches → kernel evaluation anywhere. With 10 batches the median relative
+column error is 4.6% for the paper's configuration and 3.6% for
+`whitened_affine` + `volume_det`, which deforms each impulse to the local
+ellipsoid shape — see the example page for the full figure sequence,
+regenerated from the code by `docs/generate_examples.py` and freshness-checked
+in CI.*
 
 ## The idea
 

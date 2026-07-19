@@ -22,6 +22,9 @@ jobs:
         run: cmake --build build -j $(nproc)
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Check example documentation is current
+        if: matrix.compiler == 'g++'
+        run: python3 docs/generate_examples.py --build-dir build --check
 
   pip-package:
     runs-on: ubuntu-latest
