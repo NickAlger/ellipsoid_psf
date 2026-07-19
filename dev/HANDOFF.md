@@ -69,7 +69,7 @@ pipeline, version single-sourced in `include/psfi/psfi.hpp`.
 - `include/psfi/`: config.hpp, impulse_response_field.hpp, moments.hpp
   (clamp_spd), rbf.hpp, kernel_evaluator.hpp; umbrella psfi.hpp with version
   macros (0.1.0).
-- Tests: 28 doctest cases / ~400 assertions; 82 pytest tests including a
+- Tests: 30 doctest cases / ~420 assertions; 84 pytest tests including a
   pure-numpy reference of the full prediction pipeline over all 48
   frame×scaling×support×normalization combos, scipy RBFInterpolator
   cross-checks, and an evaluator reference (prediction reference + merge +
@@ -116,6 +116,16 @@ shows k=1 vs k=10 maps.
   evaluation; det Sigma(x) := det W(x)^{-2}; eval-time SPD backstop removed.
 - **Dimension generality is now tested**: 1D + 3D closed-form batteries,
   d = 1..3 RBF checks, numpy reference generalized with d = 1, 3 comparisons.
+- **Two-domain generalization LANDED** (2026-07-19, same day as the
+  proposal): optional source mesh via constructor overload (default: source
+  = target, bit-for-bit unchanged); moment fields live on the source mesh
+  with target-valued entries (mu : Omega_src -> Omega_tgt);
+  dim_source()/dim_target() replace dim() everywhere incl. bindings
+  (num_*_vertices, *_mesh_vertices likewise); frame translation requires
+  equal dims (allowed across different same-dimension meshes — Nick's
+  overlapping-variables use case); symmetric evaluator requires all-equal
+  dims. Tests: 1D-source -> 2D-target closed-form battery + coarse/fine
+  same-dim case, C++ and bindings.
 - **etree upstream issue found**: SimplexMesh point location misses points
   exactly on the interior cube-diagonal edge shared by all 6 Freudenthal
   tets in 3D (returns -1; violates the closed-simplex convention).
@@ -143,13 +153,7 @@ shows k=1 vs k=10 maps.
    every (y,x) pair though they depend only on x. A column/batched API
    (fix x, many y) would amortize kNN + target-side work — likely 2–3× for
    the BRLR/H-matrix access pattern. ~10 us/eval today (Release build).
-6. **Two-domain generalization** (different source/target meshes,
-   dimensions may differ): API proposal drafted for Nick 2026-07-19 —
-   optional source mesh carrying the moment fields and sample points;
-   mean_translation/whitened/identity generalize, translation requires equal
-   dimensions, symmetric evaluator requires the shared-domain case. Awaiting
-   design discussion before implementation.
-7. **MPI**: the locate() hook → optional global-domain indicator; halo
+6. **MPI**: the locate() hook → optional global-domain indicator; halo
    documentation; nothing else should need to change.
 
 ## Parked ideas
