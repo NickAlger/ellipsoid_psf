@@ -8,6 +8,7 @@ add_executable(psfi_tests
     test_low_rank.cpp
     test_partition.cpp
     test_block_low_rank.cpp
+    test_fast_block.cpp
     test_rbf.cpp
     test_kernel_evaluator.cpp
     test_kernel_low_rank.cpp)

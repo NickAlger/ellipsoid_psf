@@ -421,6 +421,30 @@ PYBIND11_MODULE(psfi, m)
              "values (k,)), nearest sample first; k <= num_neighbors (samples whose\n"
              "transported point leaves the mesh are excluded, and k = 0 when the\n"
              "configuration needs moment fields at an x outside the mesh).")
+        .def("predictions_over_targets",
+             []( const ImpulseResponseField& F, const RowsXd& yy, const Eigen::VectorXd& x,
+                 const EvalConfig& config )
+             {
+                 const ImpulseResponseField::PredictionSweep sweep =
+                     F.predictions_over_targets(cols_from_rows(yy).eval(), x, config);
+                 const int k = static_cast<int>(sweep.sample_indices.size());
+                 Eigen::VectorXi indices(k);
+                 for ( int jj = 0; jj < k; ++jj )
+                 {
+                     indices(jj) = sweep.sample_indices[jj];
+                 }
+                 return std::make_tuple(indices,
+                                        Eigen::MatrixXd(sweep.sample_points.transpose()),
+                                        sweep.values, sweep.excluded);
+             },
+             "yy"_a, "x"_a, "config"_a, py::call_guard<py::gil_scoped_release>(),
+             "predictions(yy[jj], x, config) for every target row of yy at once,\n"
+             "sharing the source-side work (the fixed-source fast direction).\n"
+             "Returns (sample_indices (k,), sample_points (k, d), values (k, ny),\n"
+             "excluded (k, ny) bool): column jj holds exactly what the per-pair\n"
+             "call would produce, with excluded marking the samples that call\n"
+             "would drop (ungated transported point outside the mesh). k = 0 when\n"
+             "the per-pair calls would return no predictions for any target.")
         .def("support_ellipsoids",
              []( const ImpulseResponseField& F, const Eigen::VectorXd& x, const EvalConfig& config )
              {
@@ -663,6 +687,19 @@ PYBIND11_MODULE(psfi, m)
 
     m.def("rbf_min_degree", &rbf_min_degree, "kernel"_a,
           "Smallest polynomial-tail degree guaranteeing solvability for this kernel.");
+
+    m.def("rbf_functional",
+          []( const RowsXd& centers, const Eigen::VectorXd& eval_point, const RBFScheme& scheme )
+          {
+              return rbf_functional(cols_from_rows(centers).eval(), eval_point, scheme);
+          },
+          "centers"_a, "eval_point"_a, "scheme"_a = RBFScheme{},
+          py::call_guard<py::gil_scoped_release>(),
+          "The evaluation functional of the RBF interpolant at eval_point: weights\n"
+          "lambda with s(eval_point) = lambda @ values for EVERY data vector\n"
+          "(interpolation is linear in the data). centers: (k, d); returns (k,).\n"
+          "Same conventions and degeneracy handling as rbf_interpolate; with the\n"
+          "centers fixed, one solve serves every data vector.");
 
     m.def("rbf_interpolate",
           []( const Eigen::VectorXd& values, const RowsXd& centers, const RowsXd& eval_points,

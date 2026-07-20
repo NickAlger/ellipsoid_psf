@@ -220,3 +220,59 @@ TEST_CASE("rbf_interpolate and validate: argument checking")
     CHECK_THROWS_AS(rbf_interpolate(f_bad, P, P, ok), std::invalid_argument);
     CHECK_THROWS_AS(rbf_interpolate(f, P, Eigen::MatrixXd(3, 1), ok), std::invalid_argument);
 }
+
+
+TEST_CASE("rbf_functional: the evaluation functional matches rbf_interpolate")
+{
+    std::mt19937 gen(7);
+    auto uniform = [&]() { return 2.0 * ( static_cast<double>(gen()) / 4294967296.0 ) - 1.0; };
+    const int k = 7;
+    const int d = 2;
+    Eigen::MatrixXd C(d, k);
+    Eigen::VectorXd f(k);
+    Eigen::VectorXd p(d);
+    for ( int jj = 0; jj < k; ++jj )
+    {
+        C(0, jj) = uniform();
+        C(1, jj) = uniform();
+        f(jj) = uniform();
+    }
+    p << 0.13, -0.07;
+
+    for ( RBFKernel kernel : { RBFKernel::gaussian, RBFKernel::multiquadric,
+                               RBFKernel::inverse_multiquadric, RBFKernel::linear,
+                               RBFKernel::thin_plate_spline, RBFKernel::cubic } )
+    {
+        for ( double smoothing : { 0.0, 1e-3 } )
+        {
+            RBFScheme scheme;
+            scheme.kernel = kernel;
+            scheme.degree = std::max(1, rbf_min_degree(kernel));
+            scheme.smoothing = smoothing;
+            const Eigen::VectorXd lambda = rbf_functional(C, p, scheme);
+            REQUIRE(lambda.size() == k);
+            // Linearity in the data: lambda . f equals the interpolant, for
+            // any data vector.
+            CHECK(lambda.dot(f)
+                  == doctest::Approx(rbf_interpolate(f, C, p, scheme)(0)).epsilon(1e-9));
+        }
+    }
+
+    // Degenerate cases mirror rbf_interpolate: one center (or coincident
+    // centers) give the mean; the tail auto-lowers with k < d + 1 centers.
+    RBFScheme scheme;
+    CHECK(rbf_functional(C.col(0), p, scheme)(0) == 1.0);
+    Eigen::MatrixXd coincident = Eigen::MatrixXd::Zero(2, 3);
+    const Eigen::VectorXd lam3 = rbf_functional(coincident, p, scheme);
+    for ( int jj = 0; jj < 3; ++jj )
+    {
+        CHECK(lam3(jj) == doctest::Approx(1.0 / 3.0).epsilon(1e-15));
+    }
+    const Eigen::VectorXd lam2 = rbf_functional(C.leftCols(2), p, scheme);
+    Eigen::VectorXd f2 = f.head(2);
+    CHECK(lam2.dot(f2)
+          == doctest::Approx(rbf_interpolate(f2, C.leftCols(2), p, scheme)(0)).epsilon(1e-9));
+
+    CHECK_THROWS_AS(rbf_functional(Eigen::MatrixXd(2, 0), p, scheme), std::invalid_argument);
+    CHECK_THROWS_AS(rbf_functional(C, Eigen::Vector3d::Zero(), scheme), std::invalid_argument);
+}

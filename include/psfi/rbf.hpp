@@ -116,6 +116,99 @@ inline double rbf_phi( RBFKernel kernel, double u )
     return 0.0;
 }
 
+// The bordered system shared by rbf_interpolate and rbf_functional. Both
+// must keep identical conventions (length scale, tail lowering, assembly),
+// so those live here once.
+struct RBFSystem
+{
+    bool   constant = false; ///< single or fully coincident centers: constant interpolant
+    int    k = 0;            ///< number of centers
+    int    np = 0;           ///< tail coefficients
+    double inv_scale = 1.0;  ///< shape / r0
+    Eigen::VectorXd center_mean;
+    Eigen::MatrixXd A;       ///< (k+np, k+np) bordered matrix [Phi + lambda I, P; P^T, 0]
+};
+
+// Tail-monomial row at p (centered/scaled coordinates for conditioning).
+inline Eigen::RowVectorXd rbf_tail_row( const RBFSystem& S,
+                                        const Eigen::Ref<const Eigen::VectorXd>& p )
+{
+    Eigen::RowVectorXd row(S.np);
+    if ( S.np >= 1 )
+    {
+        row(0) = 1.0;
+    }
+    for ( int jj = 1; jj < S.np; ++jj )
+    {
+        row(jj) = ( p(jj - 1) - S.center_mean(jj - 1) ) * S.inv_scale;
+    }
+    return row;
+}
+
+// Assumes validate(scheme) has run and centers has at least one column.
+inline RBFSystem build_rbf_system( const Eigen::Ref<const Eigen::MatrixXd>& centers,
+                                   const RBFScheme& scheme )
+{
+    RBFSystem S;
+    S.k = static_cast<int>(centers.cols());
+    const int d = static_cast<int>(centers.rows());
+
+    // Local length scale: bounding-box diagonal of the centers.
+    const double r0 = ( centers.rowwise().maxCoeff() - centers.rowwise().minCoeff() ).norm();
+    if ( S.k == 1 || r0 == 0.0 )
+    {
+        S.constant = true;
+        return S;
+    }
+    S.inv_scale = scheme.shape / r0;
+
+    // Polynomial tail, auto-lowered when there are too few centers.
+    int degree = scheme.degree;
+    if ( degree == 1 && S.k < d + 1 )
+    {
+        degree = 0;
+    }
+    S.np = ( degree < 0 ) ? 0 : ( ( degree == 0 ) ? 1 : d + 1 );
+    S.center_mean = centers.rowwise().mean();
+
+    const int n = S.k + S.np;
+    S.A = Eigen::MatrixXd::Zero(n, n);
+    for ( int jj = 0; jj < S.k; ++jj )
+    {
+        for ( int ii = 0; ii < S.k; ++ii )
+        {
+            const double u = ( centers.col(ii) - centers.col(jj) ).norm() * S.inv_scale;
+            S.A(ii, jj) = rbf_phi(scheme.kernel, u);
+        }
+        S.A(jj, jj) += scheme.smoothing;
+    }
+    for ( int ii = 0; ii < S.k; ++ii )
+    {
+        S.A.block(ii, S.k, 1, S.np) = rbf_tail_row(S, centers.col(ii));
+        S.A.block(S.k, ii, S.np, 1) = S.A.block(ii, S.k, 1, S.np).transpose();
+    }
+    return S;
+}
+
+// The basis vector g at p: value of the interpolant is g . [w; c].
+inline Eigen::VectorXd rbf_basis_at( const RBFSystem& S,
+                                     const Eigen::Ref<const Eigen::MatrixXd>& centers,
+                                     const RBFScheme& scheme,
+                                     const Eigen::Ref<const Eigen::VectorXd>& p )
+{
+    Eigen::VectorXd g(S.k + S.np);
+    for ( int ii = 0; ii < S.k; ++ii )
+    {
+        const double u = ( centers.col(ii) - p ).norm() * S.inv_scale;
+        g(ii) = rbf_phi(scheme.kernel, u);
+    }
+    if ( S.np > 0 )
+    {
+        g.tail(S.np) = rbf_tail_row(S, p).transpose();
+    }
+    return g;
+}
+
 } // end namespace detail
 
 /// Evaluates the RBF interpolant of the data {(centers.col(i), values(i))}
@@ -152,77 +245,58 @@ inline Eigen::VectorXd rbf_interpolate( const Eigen::Ref<const Eigen::VectorXd>&
                                     "same number of rows (spatial dimension)");
     }
 
-    // Local length scale: bounding-box diagonal of the centers.
-    const double r0 = ( centers.rowwise().maxCoeff() - centers.rowwise().minCoeff() ).norm();
-    if ( k == 1 || r0 == 0.0 )
+    const detail::RBFSystem S = detail::build_rbf_system(centers, scheme);
+    if ( S.constant )
     {
         // One center (or all coincident): constant interpolant.
         return Eigen::VectorXd::Constant(m, values.mean());
     }
-    const double inv_scale = scheme.shape / r0;
-
-    // Polynomial tail, auto-lowered when there are too few centers. Monomials
-    // are evaluated on centered/scaled coordinates for conditioning (the
-    // interpolant is invariant to this affine change of tail basis).
-    int degree = scheme.degree;
-    if ( degree == 1 && k < d + 1 )
-    {
-        degree = 0;
-    }
-    const int np = ( degree < 0 ) ? 0 : ( ( degree == 0 ) ? 1 : d + 1 );
-    const Eigen::VectorXd center_mean = centers.rowwise().mean();
-    auto tail = [&]( const Eigen::Ref<const Eigen::VectorXd>& p ) -> Eigen::RowVectorXd
-    {
-        Eigen::RowVectorXd row(np);
-        if ( np >= 1 )
-        {
-            row(0) = 1.0;
-        }
-        for ( int jj = 1; jj < np; ++jj )
-        {
-            row(jj) = ( p(jj - 1) - center_mean(jj - 1) ) * inv_scale;
-        }
-        return row;
-    };
 
     // Bordered system [Phi + lambda I, P; P^T, 0] [w; c] = [f; 0].
-    const int n = k + np;
-    Eigen::MatrixXd A = Eigen::MatrixXd::Zero(n, n);
-    for ( int jj = 0; jj < k; ++jj )
-    {
-        for ( int ii = 0; ii < k; ++ii )
-        {
-            const double u = ( centers.col(ii) - centers.col(jj) ).norm() * inv_scale;
-            A(ii, jj) = detail::rbf_phi(scheme.kernel, u);
-        }
-        A(jj, jj) += scheme.smoothing;
-    }
-    for ( int ii = 0; ii < k; ++ii )
-    {
-        A.block(ii, k, 1, np) = tail(centers.col(ii));
-        A.block(k, ii, np, 1) = A.block(ii, k, 1, np).transpose();
-    }
-    Eigen::VectorXd b = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(S.k + S.np);
     b.head(k) = values;
-
-    const Eigen::VectorXd coeffs = A.colPivHouseholderQr().solve(b);
+    const Eigen::VectorXd coeffs = S.A.colPivHouseholderQr().solve(b);
 
     Eigen::VectorXd out(m);
     for ( int qq = 0; qq < m; ++qq )
     {
-        double s = 0.0;
-        for ( int ii = 0; ii < k; ++ii )
-        {
-            const double u = ( centers.col(ii) - eval_points.col(qq) ).norm() * inv_scale;
-            s += coeffs(ii) * detail::rbf_phi(scheme.kernel, u);
-        }
-        if ( np > 0 )
-        {
-            s += ( tail(eval_points.col(qq)) * coeffs.tail(np) ).value();
-        }
-        out(qq) = s;
+        out(qq) = detail::rbf_basis_at(S, centers, scheme, eval_points.col(qq)).dot(coeffs);
     }
     return out;
+}
+
+/// The evaluation functional of the RBF interpolant at eval_point: the
+/// weights lambda with s(eval_point) = lambda . values for EVERY data
+/// vector, since interpolation is linear in the data. Same conventions and
+/// degeneracy handling as rbf_interpolate (equal results up to rounding —
+/// the bordered matrix is symmetric, so the functional is the transposed
+/// solve). This is the piece that makes fixed-source kernel evaluation
+/// cheap: with the centers fixed, one solve gives lambda, and every further
+/// evaluation point costs a dot product.
+inline Eigen::VectorXd rbf_functional( const Eigen::Ref<const Eigen::MatrixXd>& centers,     // (dim, k)
+                                       const Eigen::Ref<const Eigen::VectorXd>& eval_point,  // (dim)
+                                       const RBFScheme& scheme )
+{
+    validate(scheme);
+    const int k = static_cast<int>(centers.cols());
+    if ( k < 1 )
+    {
+        throw std::invalid_argument("psfi::rbf_functional: need at least one center");
+    }
+    if ( eval_point.size() != centers.rows() )
+    {
+        throw std::invalid_argument("psfi::rbf_functional: eval_point and centers must have the "
+                                    "same spatial dimension");
+    }
+
+    const detail::RBFSystem S = detail::build_rbf_system(centers, scheme);
+    if ( S.constant )
+    {
+        return Eigen::VectorXd::Constant(k, 1.0 / k); // the mean, as in rbf_interpolate
+    }
+    const Eigen::VectorXd g = detail::rbf_basis_at(S, centers, scheme, eval_point);
+    // value = g . A^{-1} [f; 0] = (A^{-T} g) . [f; 0]; A is symmetric.
+    return S.A.colPivHouseholderQr().solve(g).head(k);
 }
 
 } // end namespace psfi

@@ -24,6 +24,7 @@
 /// Entries are scalar today; the planned vector/tensor extension adds
 /// vector-valued entry methods additively — see dev/VECTOR_TENSOR_EXTENSION.md.
 
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -175,6 +176,18 @@ public:
     /// The block of kernel entries [ Phi(yy.col(ii), xx.col(jj)) ]_{ii,jj},
     /// shape (num_y, num_x), evaluated in parallel (num_threads <= 0 uses all
     /// hardware threads).
+    ///
+    /// In cols-only mode this runs a fixed-source fast path: for each source
+    /// point the mesh location, field interpolation, neighbor query, and
+    /// scalings are computed once (ImpulseResponseField::
+    /// predictions_over_targets), and the RBF solve collapses to one
+    /// evaluation-functional weight vector per source (rbf_functional; the
+    /// centers do not depend on the target), cached per exclusion pattern —
+    /// so each additional target costs a gate test, a mesh lookup, and a dot
+    /// product. Results agree with entrywise operator() up to rounding.
+    /// Symmetric mode pools row-field predictions looked up near each
+    /// target, which breaks the fixed-center structure, and evaluates
+    /// entrywise.
     Eigen::MatrixXd block( const Eigen::Ref<const Eigen::MatrixXd>& yy, // (dim_target, num_y)
                            const Eigen::Ref<const Eigen::MatrixXd>& xx, // (dim_source, num_x)
                            int num_threads = 0 ) const
@@ -187,14 +200,100 @@ public:
         const int ny = static_cast<int>(yy.cols());
         const int nx = static_cast<int>(xx.cols());
         Eigen::MatrixXd out(ny, nx);
-        etree::detail::parallel_for(0, static_cast<std::ptrdiff_t>(ny) * nx,
+
+        // The fast path keys its weight cache on a 64-bit exclusion mask.
+        if ( row_field_ || config_.num_neighbors > 63 )
+        {
+            etree::detail::parallel_for(0, static_cast<std::ptrdiff_t>(ny) * nx,
+                [&]( std::ptrdiff_t aa, std::ptrdiff_t bb )
+                {
+                    for ( std::ptrdiff_t ind = aa; ind < bb; ++ind )
+                    {
+                        const int ii = static_cast<int>(ind % ny);
+                        const int jj = static_cast<int>(ind / ny);
+                        out(ii, jj) = ( *this )(yy.col(ii), xx.col(jj));
+                    }
+                }, num_threads);
+            return out;
+        }
+
+        etree::detail::parallel_for(0, nx,
             [&]( std::ptrdiff_t aa, std::ptrdiff_t bb )
             {
-                for ( std::ptrdiff_t ind = aa; ind < bb; ++ind )
+                const Eigen::VectorXd origin = Eigen::VectorXd::Zero(dim_source());
+                for ( std::ptrdiff_t jj = aa; jj < bb; ++jj )
                 {
-                    const int ii = static_cast<int>(ind % ny);
-                    const int jj = static_cast<int>(ind / ny);
-                    out(ii, jj) = ( *this )(yy.col(ii), xx.col(jj));
+                    const ImpulseResponseField::PredictionSweep sweep =
+                        col_field_->predictions_over_targets(yy, xx.col(jj), config_);
+                    const int k = static_cast<int>(sweep.sample_indices.size());
+                    if ( k == 0 )
+                    {
+                        out.col(jj).setZero();
+                        continue;
+                    }
+                    const Eigen::MatrixXd centers =
+                        sweep.sample_points.colwise() - xx.col(jj);
+
+                    // Evaluation-functional weights per exclusion pattern;
+                    // usually one pattern (nothing excluded) per source.
+                    std::vector<std::pair<std::uint64_t, Eigen::VectorXd>> cache;
+                    for ( int ii = 0; ii < ny; ++ii )
+                    {
+                        std::uint64_t mask = 0;
+                        bool all_zero = true;
+                        for ( int nn = 0; nn < k; ++nn )
+                        {
+                            if ( sweep.excluded(nn, ii) )
+                            {
+                                mask |= ( std::uint64_t(1) << nn );
+                            }
+                            else if ( sweep.values(nn, ii) != 0.0 )
+                            {
+                                all_zero = false;
+                            }
+                        }
+                        if ( all_zero )
+                        {
+                            out(ii, jj) = 0.0; // far field / fully excluded
+                            continue;
+                        }
+
+                        const Eigen::VectorXd* weights = nullptr;
+                        for ( const auto& entry : cache )
+                        {
+                            if ( entry.first == mask )
+                            {
+                                weights = &entry.second;
+                                break;
+                            }
+                        }
+                        if ( !weights )
+                        {
+                            int active = 0;
+                            Eigen::MatrixXd C(dim_source(), k);
+                            for ( int nn = 0; nn < k; ++nn )
+                            {
+                                if ( !( mask & ( std::uint64_t(1) << nn ) ) )
+                                {
+                                    C.col(active++) = centers.col(nn);
+                                }
+                            }
+                            cache.emplace_back(mask,
+                                rbf_functional(C.leftCols(active), origin, rbf_));
+                            weights = &cache.back().second;
+                        }
+
+                        double value = 0.0;
+                        int active = 0;
+                        for ( int nn = 0; nn < k; ++nn )
+                        {
+                            if ( !( mask & ( std::uint64_t(1) << nn ) ) )
+                            {
+                                value += ( *weights )(active++) * sweep.values(nn, ii);
+                            }
+                        }
+                        out(ii, jj) = value;
+                    }
                 }
             }, num_threads);
         return out;

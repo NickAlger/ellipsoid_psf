@@ -655,6 +655,208 @@ public:
         return out;
     }
 
+    /// The predictions at one source query x against MANY targets — see
+    /// predictions_over_targets.
+    struct PredictionSweep
+    {
+        std::vector<int> sample_indices; ///< shared neighbor set, nearest first
+        Eigen::MatrixXd  sample_points;  ///< (dim_source, k) — the neighbors' coordinates
+        Eigen::MatrixXd  values;         ///< (k, num_targets) prediction values
+        /// (k, num_targets): true where the sample would be DROPPED from the
+        /// per-pair prediction list (ungated transported point outside the
+        /// target mesh) — distinct from a gated zero, which is kept.
+        Eigen::Array<bool, Eigen::Dynamic, Eigen::Dynamic> excluded;
+    };
+
+    /// predictions(yy.col(jj), x, config) for every target column at once,
+    /// sharing the source-side work (mesh location, field interpolation,
+    /// nearest-neighbor query, scalings) across the whole sweep — the
+    /// fixed-source direction is the cheap one, and this is what makes
+    /// fast block assembly possible. Column jj holds exactly the values the
+    /// per-pair call would produce (same arithmetic), with excluded marking
+    /// the samples that call would drop. k = 0 (empty outputs, values with
+    /// num_targets columns) when the per-pair calls would return no
+    /// predictions for any y: no samples, or x outside the source mesh
+    /// under a configuration needing field values there. Thread-safe.
+    PredictionSweep predictions_over_targets( const Eigen::Ref<const Eigen::MatrixXd>& yy, // (dim_target, num_targets)
+                                              const Eigen::Ref<const Eigen::VectorXd>& x,
+                                              const EvalConfig& config ) const
+    {
+        if ( yy.rows() != dim_target_ || x.size() != dim_source_ )
+        {
+            throw std::invalid_argument("psfi::ImpulseResponseField::predictions_over_targets: yy "
+                                        "must have dim_target rows and x length dim_source");
+        }
+        const int ny = static_cast<int>(yy.cols());
+        PredictionSweep sweep;
+        sweep.sample_points.resize(dim_source_, 0);
+        sweep.values.resize(0, ny);
+        sweep.excluded.resize(0, ny);
+        if ( num_sample_points() == 0 )
+        {
+            return sweep;
+        }
+        validate(config);
+        if ( kdtree_dirty_ )
+        {
+            throw std::logic_error("psfi::ImpulseResponseField::predictions_over_targets: kd-tree "
+                                   "is stale; call rebuild_kdtree() after add_batch(..., "
+                                   "rebuild=false)");
+        }
+
+        // Source-side quantities, once (same as predictions()).
+        const bool need_mu_x = ( config.frame == Frame::mean_translation
+                                 || config.frame == Frame::whitened_affine );
+        const bool need_W_x  = ( config.frame == Frame::whitened_affine
+                                 || config.scaling == Scaling::volume_det );
+        const bool need_V_x  = ( config.scaling == Scaling::volume
+                                 || config.scaling == Scaling::volume_det );
+
+        const int dt = dim_target_;
+        double          V_x = 0.0;
+        double          det_Sigma_x = 0.0;
+        Eigen::VectorXd mu_x;
+        Eigen::MatrixXd W_x;
+        if ( need_mu_x || need_W_x || need_V_x )
+        {
+            int cell;
+            Eigen::VectorXd alpha;
+            if ( !locate(source_mesh(), x, cell, alpha) )
+            {
+                return sweep; // x outside the source domain: kernel is zero there
+            }
+            const Eigen::MatrixXi& scells = source_mesh().cells();
+            if ( need_V_x )
+            {
+                V_x = 0.0;
+                for ( int kk = 0; kk < dim_source_ + 1; ++kk )
+                {
+                    V_x += alpha(kk) * field_V_(scells(kk, cell));
+                }
+            }
+            if ( need_mu_x )
+            {
+                mu_x = Eigen::VectorXd::Zero(dt);
+                for ( int kk = 0; kk < dim_source_ + 1; ++kk )
+                {
+                    mu_x += alpha(kk) * field_mu_.col(scells(kk, cell));
+                }
+            }
+            if ( need_W_x )
+            {
+                W_x = Eigen::MatrixXd::Zero(dt, dt);
+                for ( int kk = 0; kk < dim_source_ + 1; ++kk )
+                {
+                    W_x += alpha(kk)
+                        * Eigen::Map<const Eigen::MatrixXd>(
+                              field_W_.col(scells(kk, cell)).data(), dt, dt);
+                }
+                const double det_W = W_x.determinant();
+                det_Sigma_x = 1.0 / ( det_W * det_W );
+            }
+        }
+
+        const int k_eff = std::min(config.num_neighbors, num_sample_points());
+        Eigen::MatrixXd xq(dim_source_, 1);
+        xq.col(0) = x;
+        const Eigen::MatrixXi nearest = kdtree_.query(xq, k_eff, 1).first;
+
+        // Per-neighbor scalings, once (they depend only on x and the sample).
+        sweep.sample_indices.resize(k_eff);
+        sweep.sample_points.resize(dim_source_, k_eff);
+        Eigen::VectorXd s(k_eff);
+        for ( int jj = 0; jj < k_eff; ++jj )
+        {
+            const int ii = nearest(jj, 0);
+            sweep.sample_indices[jj] = ii;
+            sweep.sample_points.col(jj) = sample_points_[ii];
+            switch ( config.scaling )
+            {
+                case Scaling::none:
+                    s(jj) = batches_normalized_ ? sample_V_[ii] : 1.0;
+                    break;
+                case Scaling::volume:
+                    s(jj) = batches_normalized_ ? V_x : V_x / sample_V_[ii];
+                    break;
+                case Scaling::volume_det:
+                    s(jj) = ( batches_normalized_ ? V_x : V_x / sample_V_[ii] )
+                        * std::sqrt(sample_Sigma_det_[ii] / det_Sigma_x);
+                    break;
+            }
+        }
+
+        sweep.values = Eigen::MatrixXd::Zero(k_eff, ny);
+        sweep.excluded = Eigen::Array<bool, Eigen::Dynamic, Eigen::Dynamic>::Constant(k_eff, ny,
+                                                                                     false);
+        const double tau_squared = config.tau * config.tau;
+        for ( int qq = 0; qq < ny; ++qq )
+        {
+            const Eigen::VectorXd y = yy.col(qq);
+
+            // Shared per-target pieces; the arithmetic below reproduces the
+            // per-pair predictions() expressions exactly.
+            Eigen::VectorXd dy;   // y - x (translation) or y - mu(x) (mean_translation)
+            Eigen::VectorXd wvec; // W(x) (y - mu(x)) (whitened_affine)
+            bool shared_gate_inside = true;
+            if ( config.frame == Frame::translation )
+            {
+                dy = y - x;
+            }
+            else if ( config.frame == Frame::mean_translation )
+            {
+                dy = y - mu_x;
+            }
+            else if ( config.frame == Frame::whitened_affine )
+            {
+                wvec = W_x * ( y - mu_x );
+                shared_gate_inside = ( wvec.squaredNorm() <= tau_squared );
+            }
+
+            for ( int jj = 0; jj < k_eff; ++jj )
+            {
+                const int ii = sweep.sample_indices[jj];
+                Eigen::VectorXd z;
+                switch ( config.frame )
+                {
+                    case Frame::identity:         z = y;                         break;
+                    case Frame::translation:      z = dy + sample_points_[ii];   break;
+                    case Frame::mean_translation: z = dy + sample_mu_[ii];       break;
+                    case Frame::whitened_affine:  z = sample_mu_[ii] + sample_Sigma_sqrt_[ii] * wvec; break;
+                }
+
+                if ( config.support == Support::ellipsoid )
+                {
+                    bool inside = shared_gate_inside;
+                    if ( config.frame != Frame::whitened_affine )
+                    {
+                        const Eigen::VectorXd dz = z - sample_mu_[ii];
+                        inside = ( dz.dot(sample_Sigma_inv_[ii] * dz) <= tau_squared );
+                    }
+                    if ( !inside )
+                    {
+                        continue; // gated: kept with value 0
+                    }
+                }
+
+                int cell;
+                Eigen::VectorXd alpha;
+                if ( !locate(mesh_target_, z, cell, alpha) )
+                {
+                    sweep.excluded(jj, qq) = true; // ungated, off the mesh: dropped
+                    continue;
+                }
+                const Eigen::VectorXd& psi = batch_values_[point2batch_[ii]];
+                double raw = 0.0;
+                for ( int kk = 0; kk < dt + 1; ++kk )
+                {
+                    raw += alpha(kk) * psi(mesh_target_.cells()(kk, cell));
+                }
+                sweep.values(jj, qq) = s(jj) * raw;
+            }
+        }
+        return sweep;
+    }
+
     /// Ellipsoids in the target domain covering the support of the
     /// predictions at source query point x: predictions(y, x, config) are
     /// all zero whenever y lies outside every returned ellipsoid — the

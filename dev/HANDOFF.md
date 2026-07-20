@@ -143,10 +143,19 @@ Nick's verdict on gaussian_psf).
   Notes index section from docs/notes/*.md — NEVER hand-edit
   docs/README.md, it is fully generated, and the hand-edited Notes section
   had broken the CI docs freshness check between commits 0eb9b04 and this
-  slice], (7) column-major eval perf slice (amortize
-  locate/fields/kNN/RBF-factorization per source point; the RBF weight
-  vector depends only on centers, so per-y cost drops to gate + mesh locate
-  + dot; excluded-neighbor edge cases fall back to per-y solves).
+  slice], (7) fixed-source fast path [DONE — block() in cols-only mode runs
+  ImpulseResponseField::predictions_over_targets (source-side work once per
+  source, bitwise-equal values to per-pair predictions) + rbf_functional
+  (the evaluation-functional weights; rbf.hpp internals factored into
+  detail::build_rbf_system/rbf_basis_at) with a per-exclusion-mask weight
+  cache; symmetric mode and num_neighbors > 63 fall back to entrywise.
+  Structural zeros (all predictions gated to zero) stay EXACT on both paths
+  — the sparsity invariants rely on it; coincidental near-zeros of the
+  solve only agree to rounding (tests distinguish the two). Measured:
+  frog_compression 48 -> 35.6 s wall (CPU halved); per-entry ~1.9x on the
+  gated frog matrix, ~1.3x ungated — as predicted ~2x, because per-
+  (neighbor, target) mesh location is inherently not amortizable and now
+  dominates. Docs regenerate bit-identically].
 
 ## State (all pushed to main, CI fully green)
 
@@ -255,11 +264,11 @@ shows k=1 vs k=10 maps.
    ProductConvolutionKernel/ImpulseResponseBatches Python classes) and the
    GPSF/ymir-adjacent BRLR/GLR projects consume this instead of
    hlibpro_python_wrapper.
-5. **Performance, column-major eval**: `predictions()` recomputes target-side
-   quantities (locate x, moment interpolation, Sigma(x)^{-1/2} eigh) for
-   every (y,x) pair though they depend only on x. A column/batched API
-   (fix x, many y) would amortize kNN + target-side work — likely 2–3× for
-   the BRLR/H-matrix access pattern. ~10 us/eval today (Release build).
+5. **Performance, column-major eval**: DONE (slice 7 above; ~2x measured).
+   The next lever, if ever needed, is the per-(neighbor, target) mesh
+   location that now dominates block assembly — spatial coherence
+   (cell-walking from the previous target's cell) would amortize it, since
+   consecutive targets are near each other under the geometric orderings.
 6. **MPI**: the locate() hook → optional global-domain indicator; halo
    documentation; nothing else should need to change.
 
