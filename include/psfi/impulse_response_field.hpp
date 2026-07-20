@@ -60,6 +60,7 @@
 
 #include <Eigen/Dense>
 
+#include "etree/geometry.hpp"
 #include "etree/kd_tree.hpp"
 #include "etree/simplex_mesh.hpp"
 
@@ -650,6 +651,130 @@ public:
                     break;
             }
             out.push_back(Prediction{ii, xi, s * raw});
+        }
+        return out;
+    }
+
+    /// Ellipsoids in the target domain covering the support of the
+    /// predictions at source query point x: predictions(y, x, config) are
+    /// all zero whenever y lies outside every returned ellipsoid — the
+    /// gate makes this exact, not heuristic (this is what makes block
+    /// sparsity built from these sets lossless w.r.t. the approximate
+    /// kernel). Ellipsoids are returned at UNIT scale, config.tau folded
+    /// into Sigma, so membership is (y - mu)^T Sigma^{-1} (y - mu) <= 1
+    /// (etree::EllipsoidTree consumes them with tau = 1).
+    ///
+    /// whitened_affine shares one gate across the neighbor set and yields a
+    /// single ellipsoid (the field ellipsoid at x); the other frames yield
+    /// one ellipsoid per nearest sample. Returns an empty vector when the
+    /// predictions at x are empty a priori (no samples, or x outside the
+    /// source mesh under a configuration needing field values there).
+    /// Requires config.support == Support::ellipsoid: without the gate the
+    /// predictions have no compact support and this throws.
+    std::vector<etree::Ellipsoid> support_ellipsoids( const Eigen::Ref<const Eigen::VectorXd>& x,
+                                                      const EvalConfig& config ) const
+    {
+        if ( x.size() != dim_source_ )
+        {
+            throw std::invalid_argument("psfi::ImpulseResponseField::support_ellipsoids: x must "
+                                        "have length dim_source");
+        }
+        if ( config.support != Support::ellipsoid )
+        {
+            throw std::invalid_argument("psfi::ImpulseResponseField::support_ellipsoids: the "
+                                        "predictions have compact support only under "
+                                        "Support::ellipsoid");
+        }
+        validate(config);
+        if ( num_sample_points() == 0 )
+        {
+            return {};
+        }
+        if ( kdtree_dirty_ )
+        {
+            throw std::logic_error("psfi::ImpulseResponseField::support_ellipsoids: kd-tree is "
+                                   "stale; call rebuild_kdtree() after add_batch(..., "
+                                   "rebuild=false)");
+        }
+
+        // Mirror predictions(): the same query-side lookups decide whether
+        // the prediction set is empty, and the same interpolated fields
+        // enter the gate.
+        const bool need_mu_x = ( config.frame == Frame::mean_translation
+                                 || config.frame == Frame::whitened_affine );
+        const bool need_W_x  = ( config.frame == Frame::whitened_affine
+                                 || config.scaling == Scaling::volume_det );
+        const bool need_V_x  = ( config.scaling == Scaling::volume
+                                 || config.scaling == Scaling::volume_det );
+
+        const int dt = dim_target_;
+        const double tau_squared = config.tau * config.tau;
+        Eigen::VectorXd mu_x;
+        Eigen::MatrixXd W_x;
+        if ( need_mu_x || need_W_x || need_V_x )
+        {
+            int cell;
+            Eigen::VectorXd alpha;
+            if ( !locate(source_mesh(), x, cell, alpha) )
+            {
+                return {}; // x outside the source domain: no predictions, zero column
+            }
+            const Eigen::MatrixXi& scells = source_mesh().cells();
+            if ( need_mu_x )
+            {
+                mu_x = Eigen::VectorXd::Zero(dt);
+                for ( int kk = 0; kk < dim_source_ + 1; ++kk )
+                {
+                    mu_x += alpha(kk) * field_mu_.col(scells(kk, cell));
+                }
+            }
+            if ( need_W_x && config.frame == Frame::whitened_affine )
+            {
+                W_x = Eigen::MatrixXd::Zero(dt, dt);
+                for ( int kk = 0; kk < dim_source_ + 1; ++kk )
+                {
+                    W_x += alpha(kk)
+                        * Eigen::Map<const Eigen::MatrixXd>(
+                              field_W_.col(scells(kk, cell)).data(), dt, dt);
+                }
+            }
+        }
+
+        std::vector<etree::Ellipsoid> out;
+        if ( config.frame == Frame::whitened_affine )
+        {
+            // Shared gate |W(x)(y - mu(x))| <= tau, i.e. the field ellipsoid
+            // at x: (y - mu_x)^T (tau^2 (W_x^2)^{-1})^{-1} (y - mu_x) <= 1.
+            out.push_back(etree::Ellipsoid{ mu_x,
+                                            tau_squared * ( W_x * W_x ).inverse() });
+            return out;
+        }
+
+        const int k_eff = std::min(config.num_neighbors, num_sample_points());
+        Eigen::MatrixXd xq(dim_source_, 1);
+        xq.col(0) = x;
+        const Eigen::MatrixXi nearest = kdtree_.query(xq, k_eff, 1).first;
+        out.reserve(k_eff);
+        for ( int jj = 0; jj < k_eff; ++jj )
+        {
+            const int ii = nearest(jj, 0);
+            Eigen::VectorXd center;
+            switch ( config.frame )
+            {
+                case Frame::identity:
+                    center = sample_mu_[ii];
+                    break;
+                case Frame::translation: // gate: y - x + x_i in E_i
+                    center = x + sample_mu_[ii] - sample_points_[ii];
+                    break;
+                case Frame::mean_translation: // gate: y - mu(x) + mu_i in E_i
+                    center = mu_x;
+                    break;
+                case Frame::whitened_affine: // handled above
+                    break;
+            }
+            out.push_back(etree::Ellipsoid{ std::move(center),
+                                            tau_squared * sample_Sigma_[ii] });
         }
         return out;
     }

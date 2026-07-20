@@ -6,6 +6,7 @@ add_executable(psfi_tests
     test_source_target.cpp
     test_moments.cpp
     test_low_rank.cpp
+    test_partition.cpp
     test_rbf.cpp
     test_kernel_evaluator.cpp
     test_kernel_low_rank.cpp)

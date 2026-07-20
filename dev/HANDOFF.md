@@ -128,7 +128,9 @@ Nick's verdict on gaussian_psf).
 - **Mass weights**: out for this version; per-point weights are a parked
   idea if weighted truncation is ever needed.
 - Agreed slicing: (1) low_rank.hpp generic tools [DONE], (2) global low rank
-  from the evaluator [DONE], (3) partition + support oracles + target-set builder,
+  from the evaluator [DONE], (3) partition + support oracles + target-set
+  builder [DONE — incl. a test proving the adjoint piece is load-bearing:
+  cols-only sets miss genuinely nonzero symmetric-mode entries],
   (4) BlockLowRank container + builder + tests (BRLR-vs-dense, adjoint,
   1D->2D, support exactness), (5) BRLR -> GLR via randomized_svd, (6) docs
   example + MPI design notes, (7) column-major eval perf slice (amortize
@@ -145,9 +147,15 @@ Nick's verdict on gaussian_psf).
   (slice 2: global low rank of the kernel matrix over given target/source
   points, dense-SVD and ACA pathways + automatic selection by
   dense_min_dim; THE source/target <-> rows/cols adapter, mapping stated in
-  its file header), rbf.hpp, kernel_evaluator.hpp; umbrella psfi.hpp with
-  version macros (0.1.0).
-- Tests: 49 doctest cases / 560 assertions; 95 pytest tests including a
+  its file header), partition.hpp (slice 3: recursive_bisection_partition —
+  nth_element median splits, tie-broken comparator for cross-platform
+  determinism — and block_target_sets, forward + adjoint EllipsoidTree
+  passes), rbf.hpp, kernel_evaluator.hpp (+ target_support/source_support
+  oracles; the shared implementation is
+  ImpulseResponseField::support_ellipsoids, which returns UNIT-scale
+  ellipsoids with tau folded into Sigma); umbrella psfi.hpp with version
+  macros (0.1.0).
+- Tests: 55 doctest cases / 938 assertions; 98 pytest tests including a
   pure-numpy reference of the full prediction pipeline over all 48
   frame×scaling×support×normalization combos, scipy RBFInterpolator
   cross-checks, an evaluator reference (prediction reference + merge +

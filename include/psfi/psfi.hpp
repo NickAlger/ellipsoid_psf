@@ -34,3 +34,4 @@
 #include "psfi/rbf.hpp"                    // RBF interpolation of scattered data
 #include "psfi/kernel_evaluator.hpp"       // Phi(y, x) entries and threaded blocks
 #include "psfi/kernel_low_rank.hpp"        // global low rank of the kernel matrix (dense-SVD / ACA)
+#include "psfi/partition.hpp"              // source partitioning + per-block target sets

@@ -101,6 +101,28 @@ py::array_t<double> stack_from_flat_field( const Eigen::MatrixXd& flat, int d )
     return out;
 }
 
+// Ellipsoid list -> (centers (k, d), Sigmas (k, d, d)) numpy pair.
+std::pair<Eigen::MatrixXd, py::array_t<double>>
+arrays_from_ellipsoids( const std::vector<etree::Ellipsoid>& ells, int d )
+{
+    const int k = static_cast<int>(ells.size());
+    Eigen::MatrixXd centers(k, d);
+    py::array_t<double> Sigmas({k, d, d});
+    auto A = Sigmas.mutable_unchecked<3>();
+    for ( int ii = 0; ii < k; ++ii )
+    {
+        centers.row(ii) = ells[ii].mu.transpose();
+        for ( int rr = 0; rr < d; ++rr )
+        {
+            for ( int cc = 0; cc < d; ++cc )
+            {
+                A(ii, rr, cc) = ells[ii].Sigma(rr, cc);
+            }
+        }
+    }
+    return std::make_pair(std::move(centers), std::move(Sigmas));
+}
+
 // one matrix per entry -> (n, d, d) numpy stack.
 py::array_t<double> stack_from_matrices( const std::vector<Eigen::MatrixXd>& mats, int d )
 {
@@ -398,7 +420,19 @@ PYBIND11_MODULE(psfi, m)
              "coordinates. Returns (sample_indices (k,), sample_points (k, d),\n"
              "values (k,)), nearest sample first; k <= num_neighbors (samples whose\n"
              "transported point leaves the mesh are excluded, and k = 0 when the\n"
-             "configuration needs moment fields at an x outside the mesh).");
+             "configuration needs moment fields at an x outside the mesh).")
+        .def("support_ellipsoids",
+             []( const ImpulseResponseField& F, const Eigen::VectorXd& x, const EvalConfig& config )
+             {
+                 return arrays_from_ellipsoids(F.support_ellipsoids(x, config), F.dim_target());
+             },
+             "x"_a, "config"_a,
+             "Ellipsoids covering the support of the predictions at source query x:\n"
+             "predictions(y, x, config) are all zero for y outside every ellipsoid\n"
+             "(exact, not heuristic). Returns (centers (k, d_target), Sigmas\n"
+             "(k, d_target, d_target)) at UNIT scale — config.tau is folded in, so\n"
+             "membership is (y - c) @ inv(S) @ (y - c) <= 1. Empty when the column\n"
+             "at x is identically zero. Requires Support.ellipsoid.");
 
     // ------------------------------------------------------------------
     //  Moment-data hygiene
@@ -687,7 +721,24 @@ PYBIND11_MODULE(psfi, m)
              },
              "yy"_a, "xx"_a, "num_threads"_a = 0, py::call_guard<py::gil_scoped_release>(),
              "Block [Phi(yy[i], xx[j])]_{ij} of shape (num_y, num_x), evaluated in\n"
-             "parallel; yy: (num_y, d), xx: (num_x, d). num_threads <= 0 uses all cores.");
+             "parallel; yy: (num_y, d), xx: (num_x, d). num_threads <= 0 uses all cores.")
+        .def("target_support",
+             []( const KernelEvaluator& K, const Eigen::VectorXd& x )
+             { return arrays_from_ellipsoids(K.target_support(x), K.dim_target()); },
+             "x"_a,
+             "Ellipsoids (unit scale, tau folded in) covering the col-field support\n"
+             "of the kernel column Phi(., x), as (centers (k, d_target), Sigmas\n"
+             "(k, d_target, d_target)). Covers the whole column in cols-only mode;\n"
+             "in symmetric mode the full column support additionally includes the\n"
+             "targets y with x inside source_support(y).")
+        .def("source_support",
+             []( const KernelEvaluator& K, const Eigen::VectorXd& y )
+             { return arrays_from_ellipsoids(K.source_support(y), K.dim_source()); },
+             "y"_a,
+             "Symmetric mode only: ellipsoids in the SOURCE domain covering the\n"
+             "row-field contribution to the kernel row Phi(y, .), as (centers\n"
+             "(k, d_source), Sigmas (k, d_source, d_source)). Raises in cols-only\n"
+             "mode.");
 
     // ------------------------------------------------------------------
     //  Kernel low rank (the source/target <-> rows/cols adapter)
@@ -782,4 +833,33 @@ PYBIND11_MODULE(psfi, m)
           "correspond to targets and V rows to sources (target axis = matrix rows,\n"
           "source axis = matrix columns, matching KernelEvaluator.block).\n"
           "Deterministic for a given options.seed.");
+
+    // ------------------------------------------------------------------
+    //  Partitioning and per-block target sets
+    // ------------------------------------------------------------------
+
+    m.def("recursive_bisection_partition",
+          []( const RowsXd& points, int max_part_size )
+          { return recursive_bisection_partition(cols_from_rows(points).eval(), max_part_size); },
+          "points"_a, "max_part_size"_a, py::call_guard<py::gil_scoped_release>(),
+          "Partitions {0, ..., n-1} into spatially coherent parts of at most\n"
+          "max_part_size points by recursive median bisection along cycling axes;\n"
+          "points: (n, d). Returns a list of sorted index lists (disjoint, covering).\n"
+          "Deterministic across platforms. A partition is plain data — any other\n"
+          "partitioner can produce the same shape for the downstream builders.");
+
+    m.def("block_target_sets",
+          []( const KernelEvaluator& kernel, const RowsXd& yy, const RowsXd& xx,
+              const std::vector<std::vector<int>>& source_partition, int num_threads )
+          {
+              return block_target_sets(kernel, cols_from_rows(yy).eval(),
+                                       cols_from_rows(xx).eval(), source_partition, num_threads);
+          },
+          "kernel"_a, "yy"_a, "xx"_a, "source_partition"_a, "num_threads"_a = 0,
+          py::call_guard<py::gil_scoped_release>(),
+          "For each part of a source partition (disjoint index lists into the rows\n"
+          "of xx), the sorted indices of the targets (rows of yy) where kernel\n"
+          "entries against that part's sources can be nonzero — every excluded\n"
+          "entry is exactly zero, by the support oracles. Symmetric mode includes\n"
+          "the adjoint piece; Support.none gives every part all targets.");
 }

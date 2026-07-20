@@ -32,6 +32,7 @@
 #include <Eigen/Dense>
 
 #include "etree/detail/parallel_for.hpp"
+#include "etree/geometry.hpp"
 
 #include "psfi/config.hpp"
 #include "psfi/impulse_response_field.hpp"
@@ -197,6 +198,33 @@ public:
                 }
             }, num_threads);
         return out;
+    }
+
+    /// Ellipsoids (unit scale, tau folded in) covering the support of the
+    /// col-field contribution to the kernel column Phi(., x): those
+    /// predictions vanish for y outside the union. In cols-only mode this
+    /// covers the whole column; in symmetric mode the row field contributes
+    /// too, and the full column support is this union PLUS the targets y
+    /// with x inside source_support(y). Requires the ellipsoid support gate.
+    std::vector<etree::Ellipsoid> target_support( const Eigen::Ref<const Eigen::VectorXd>& x ) const
+    {
+        return col_field_->support_ellipsoids(x, config_);
+    }
+
+    /// Symmetric mode only: ellipsoids in the SOURCE domain covering the
+    /// support of the row-field contribution to the kernel row Phi(y, .) —
+    /// that contribution vanishes for x outside the union. (The col field
+    /// contributes to the row elsewhere; its part is covered per-column by
+    /// target_support.) Throws in cols-only mode, where no row field exists.
+    std::vector<etree::Ellipsoid> source_support( const Eigen::Ref<const Eigen::VectorXd>& y ) const
+    {
+        if ( !row_field_ )
+        {
+            throw std::logic_error("psfi::KernelEvaluator::source_support: requires symmetric mode "
+                                   "(a row field); in cols-only mode kernel rows have no computable "
+                                   "compact support");
+        }
+        return row_field_->support_ellipsoids(y, config_);
     }
 
 private:
