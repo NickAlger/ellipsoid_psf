@@ -370,6 +370,40 @@ TEST_CASE("block_low_rank: 1D source domain, 2D target domain")
 }
 
 
+TEST_CASE("randomized_svd(BlockLowRank): the BRLR -> global low rank hop")
+{
+    auto F = make_moment_field();
+    const KernelEvaluator K(F, nullptr, gated_config(Frame::whitened_affine));
+    Eigen::MatrixXd vertices;
+    Eigen::MatrixXi cells;
+    make_grid_mesh(8, vertices, cells);
+    const Eigen::MatrixXd& yy = vertices;
+    const Eigen::MatrixXd xx = square_grid(4, 0.15, 0.85);
+    const auto partition = recursive_bisection_partition(xx, 4);
+
+    const BlockLowRank B = block_low_rank(K, yy, xx, partition, 1e-10).matrix;
+    const Eigen::MatrixXd D = B.to_dense();
+
+    // Full-width sampling (max_rank = num_sources) captures B's whole range:
+    // the global factors reproduce the BRLR matrix to rounding.
+    const LowRank G = randomized_svd(B, 16);
+    CHECK(G.U.rows() == 81);
+    CHECK(G.V.rows() == 16);
+    CHECK(( D - G.to_dense() ).norm() <= 1e-10 * D.norm());
+
+    // Truncated: comparable to the best rank-r approximation of D.
+    RSVDOptions options;
+    options.power_iterations = 2;
+    const LowRank G6 = randomized_svd(B, 6, options);
+    const double best = ( D - truncated_svd(D, 0.0, 6).to_dense() ).norm() / D.norm();
+    CHECK(( D - G6.to_dense() ).norm() / D.norm() <= 10.0 * best + 1e-14);
+
+    // Deterministic for a fixed seed.
+    const LowRank G2 = randomized_svd(B, 6, options);
+    CHECK(( G6.U - G2.U ).cwiseAbs().maxCoeff() == 0.0);
+}
+
+
 TEST_CASE("BlockLowRank: container validation")
 {
     BlockLowRank::Block ok;

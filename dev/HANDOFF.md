@@ -132,7 +132,8 @@ Nick's verdict on gaussian_psf).
   builder [DONE — incl. a test proving the adjoint piece is load-bearing:
   cols-only sets miss genuinely nonzero symmetric-mode entries],
   (4) BlockLowRank container + builder + tests (BRLR-vs-dense, adjoint,
-  1D->2D, support exactness) [DONE], (5) BRLR -> GLR via randomized_svd,
+  1D->2D, support exactness) [DONE], (5) BRLR -> GLR via randomized_svd
+  [DONE — randomized_svd(BlockLowRank, max_rank, opts) overload],
   (6) docs example + MPI design notes, (7) column-major eval perf slice (amortize
   locate/fields/kNN/RBF-factorization per source point; the RBF weight
   vector depends only on centers, so per-y cost drops to gate + mesh locate
@@ -282,6 +283,11 @@ shows k=1 vs k=10 maps.
 - **ALWAYS configure with `-DCMAKE_BUILD_TYPE=Release`** (or RelWithDebInfo).
   An empty build type cost a factor ~100 in the example (~700 us/eval vs
   ~10 us) and blew a 10-minute timeout before being caught.
+- **Build with `-j 3` (NOT `-j $(nproc)`) on Nick's machine**: 13 GiB RAM /
+  8 cores, and parallel compilation of the Eigen-heavy TUs (the pybind11
+  bindings TU especially) at -j 8 drove the machine into swap hard enough
+  to freeze the UI (2026-07-19; has happened before). ~2 GB per TU is the
+  planning number.
 - Local dev against the etree checkout:
   `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_SOURCE_DIR_ETREE=$HOME/repos/ellipsoid_tree`.
   Installed-etree route also works (`find_package`); PSFI_INSTALL requires it

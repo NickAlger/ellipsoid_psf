@@ -54,6 +54,20 @@ def test_tolerance_and_diagnostics():
     assert capped.any_hit_max_rank and not capped.all_converged
 
 
+def test_brlr_to_global_low_rank():
+    K, yy, xx, partition = build_problem()
+    B = psfi.block_low_rank(K, yy, xx, partition, 1e-10).matrix
+    D = B.to_dense()
+
+    G = psfi.randomized_svd(B, 16)  # full-width sampling: exact to rounding
+    assert G.U.shape == (81, 16) and G.V.shape == (16, 16)
+    assert np.linalg.norm(D - G.to_dense()) <= 1e-10 * np.linalg.norm(D)
+
+    G6 = psfi.randomized_svd(B, 6, psfi.RSVDOptions(power_iterations=2))
+    best = np.linalg.norm(D - psfi.truncated_svd(D, 0.0, max_rank=6).to_dense())
+    assert np.linalg.norm(D - G6.to_dense()) <= 10 * best + 1e-14
+
+
 def test_container_round_trip():
     K, yy, xx, partition = build_problem()
     B = psfi.block_low_rank(K, yy, xx, partition, 1e-6).matrix

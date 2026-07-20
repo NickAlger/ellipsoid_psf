@@ -984,4 +984,14 @@ PYBIND11_MODULE(psfi, m)
           "is also the whole-matrix bound. yy: (num_targets, dim_target),\n"
           "xx: (num_sources, dim_source). Deterministic (per-block seeds\n"
           "options.seed + block index).");
+
+    m.def("randomized_svd",
+          []( const BlockLowRank& B, int max_rank, const RSVDOptions& options )
+          { return randomized_svd(B, max_rank, options); },
+          "matrix"_a, "max_rank"_a, "options"_a = RSVDOptions{},
+          py::call_guard<py::gil_scoped_release>(),
+          "Global low rank from a BlockLowRank matrix — the BRLR -> GLR hop:\n"
+          "randomized SVD driven by the block applies (no further kernel\n"
+          "evaluations). U rows = targets, V rows = sources. Deterministic for a\n"
+          "given options.seed.");
 }

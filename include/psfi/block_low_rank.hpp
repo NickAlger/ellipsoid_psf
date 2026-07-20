@@ -443,4 +443,26 @@ block_low_rank( const KernelEvaluator& kernel,
     return result;
 }
 
+/// Global low rank from a block low rank matrix — the (e) -> (f) hop of the
+/// pipeline: randomized SVD driven by the (cheap, BLAS-3) block applies
+/// instead of kernel entry sampling. Returns factors with U rows = targets,
+/// V rows = sources, like kernel_low_rank. At scale this beats global ACA
+/// on the kernel: once the blocks are built, no further kernel evaluations
+/// happen at all. Deterministic for a given options.seed.
+inline LowRank randomized_svd( const BlockLowRank& B,
+                               int max_rank,
+                               const RSVDOptions& options = {} )
+{
+    auto apply = [&B]( const Eigen::Ref<const Eigen::MatrixXd>& X ) -> Eigen::MatrixXd
+    {
+        return B.apply(X);
+    };
+    auto apply_transpose = [&B]( const Eigen::Ref<const Eigen::MatrixXd>& Y ) -> Eigen::MatrixXd
+    {
+        return B.applyT(Y);
+    };
+    return randomized_svd(apply, apply_transpose, B.num_targets(), B.num_sources(),
+                          max_rank, options);
+}
+
 } // end namespace psfi
