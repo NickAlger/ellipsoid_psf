@@ -113,6 +113,18 @@ def main() -> int:
         index_lines.append(f"- [{title}](examples/{name}.md)")
         print(f"generated docs/examples/{name}.md ({len(figure_names)} figures)")
 
+    # Hand-written notes get an index section too (their titles are read from
+    # the first heading), so the whole README stays generated and the
+    # freshness check covers it.
+    notes = sorted((DOCS_DIR / "notes").glob("*.md"))
+    if notes:
+        index_lines += ["", "## Notes", "",
+                        "Hand-written notes on behavior worth knowing about (not generated):", ""]
+        for note in notes:
+            first_line = note.read_text().splitlines()[0].strip()
+            title = first_line.lstrip("#").strip() if first_line.startswith("#") else note.stem
+            index_lines.append(f"- [{title}](notes/{note.name})")
+
     index_lines += [""]
     (DOCS_DIR / "README.md").write_text("\n".join(index_lines))
 

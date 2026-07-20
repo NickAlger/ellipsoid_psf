@@ -134,7 +134,16 @@ Nick's verdict on gaussian_psf).
   (4) BlockLowRank container + builder + tests (BRLR-vs-dense, adjoint,
   1D->2D, support exactness) [DONE], (5) BRLR -> GLR via randomized_svd
   [DONE — randomized_svd(BlockLowRank, max_rank, opts) overload],
-  (6) docs example + MPI design notes, (7) column-major eval perf slice (amortize
+  (6) docs example + MPI design notes [DONE — examples/frog_compression.cpp
+  page (partition/target-set figure, rank map, BRLR-vs-equal-storage-GLR
+  column error maps, tolerance sweep table; per-block compression pinned to
+  dense_svd so printed numbers are toolchain-stable — ACA pivot chains are
+  NOT stable across compilers, keep ACA numbers out of freshness-checked
+  docs); docs/notes/distributed_design.md; generate_examples.py now emits a
+  Notes index section from docs/notes/*.md — NEVER hand-edit
+  docs/README.md, it is fully generated, and the hand-edited Notes section
+  had broken the CI docs freshness check between commits 0eb9b04 and this
+  slice], (7) column-major eval perf slice (amortize
   locate/fields/kNN/RBF-factorization per source point; the RBF weight
   vector depends only on centers, so per-y cost drops to gate + mesh locate
   + dot; excluded-neighbor edge cases fall back to per-y solves).

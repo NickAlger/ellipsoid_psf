@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 set(PSFI_EXAMPLE_NAMES
+    frog_compression
     frog_kernel)
 
 foreach(example_name ${PSFI_EXAMPLE_NAMES})
