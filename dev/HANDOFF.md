@@ -317,7 +317,7 @@ shows k=1 vs k=10 maps.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
       -DFETCHCONTENT_SOURCE_DIR_ETREE=$HOME/repos/ellipsoid_tree \
       -DPSFI_BUILD_PYTHON=ON -DPython_EXECUTABLE=$HOME/miniconda3/envs/t3toolbox/bin/python
-cmake --build build -j $(nproc) && ctest --test-dir build
+cmake --build build -j 3 && ctest --test-dir build   # -j 3: see the OOM gotcha
 PYTHONPATH=build/bindings ~/miniconda3/envs/t3toolbox/bin/python -m pytest bindings/tests -q
 python3 docs/generate_examples.py --build-dir build   # regenerate example docs
 ```

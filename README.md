@@ -122,8 +122,10 @@ B = K.block(yy, xx)     # (num_y, num_x) block, threaded
 ## Building and testing
 
 ```sh
-cmake -S . -B build && cmake --build build -j $(nproc) && ctest --test-dir build
+cmake -S . -B build && cmake --build build -j 4 && ctest --test-dir build
 ```
+
+(`-j 4`, not `-j $(nproc)` — see the compile-time note below.)
 
 etree is found via `find_package(etree)`, with a pinned FetchContent download
 as fallback (for local development against a checkout:
@@ -131,6 +133,26 @@ as fallback (for local development against a checkout:
 `pip install .`, or `cmake -B build -DPSFI_BUILD_PYTHON=ON` and use
 `build/bindings`. Binding tests (`bindings/tests`) check the C++ against a
 pure-numpy reference implementation over every configuration axis.
+
+## Compile time and memory
+
+psfi is header-only and includes Eigen (via etree), so every translation
+unit that includes a psfi header pays the full template-instantiation cost —
+and psfi is substantially heavier than a bare Eigen include, because the
+library's concrete inline function bodies (among them the SVD/QR
+factorizations of the low-rank layer) are compiled in every such TU.
+Measured on an ordinary 8-core laptop with g++: a file including the
+`psfi/psfi.hpp` umbrella costs roughly **50 s and 1.5 GB of RAM** to
+compile (`-O0` is no cheaper — the cost is front-end instantiation, not
+optimization). Including only the headers you use roughly halves that
+(`psfi/kernel_evaluator.hpp` alone: ~23 s, ~1.0 GB).
+
+The practical consequence: **on a memory-limited machine, do not
+over-parallelize the build.** Concurrent compile jobs each hold their peak
+simultaneously, and a machine pushed into swap by parallel Eigen
+instantiation can freeze outright. Keep at least ~2 GB of RAM per job —
+`cmake --build build -j N` with N no larger than your RAM in GB divided
+by 2 — or set up a precompiled header on your side.
 
 ## Locality (a note for distributed use)
 
