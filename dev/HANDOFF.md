@@ -128,7 +128,7 @@ Nick's verdict on gaussian_psf).
 - **Mass weights**: out for this version; per-point weights are a parked
   idea if weighted truncation is ever needed.
 - Agreed slicing: (1) low_rank.hpp generic tools [DONE], (2) global low rank
-  from the evaluator, (3) partition + support oracles + target-set builder,
+  from the evaluator [DONE], (3) partition + support oracles + target-set builder,
   (4) BlockLowRank container + builder + tests (BRLR-vs-dense, adjoint,
   1D->2D, support exactness), (5) BRLR -> GLR via randomized_svd, (6) docs
   example + MPI design notes, (7) column-major eval perf slice (amortize
@@ -141,9 +141,13 @@ Nick's verdict on gaussian_psf).
 - `include/psfi/`: config.hpp, impulse_response_field.hpp, moments.hpp
   (clamp_spd), low_rank.hpp (truncated_svd, recompress, aca, randomized_svd
   — slice 1 of the downstream-matrix work, all Frobenius-rtol, deterministic
-  seeds, ACAResult diagnostics incl. hit_max_rank), rbf.hpp,
-  kernel_evaluator.hpp; umbrella psfi.hpp with version macros (0.1.0).
-- Tests: 44 doctest cases / 528 assertions; 92 pytest tests including a
+  seeds, ACAResult diagnostics incl. hit_max_rank), kernel_low_rank.hpp
+  (slice 2: global low rank of the kernel matrix over given target/source
+  points, dense-SVD and ACA pathways + automatic selection by
+  dense_min_dim; THE source/target <-> rows/cols adapter, mapping stated in
+  its file header), rbf.hpp, kernel_evaluator.hpp; umbrella psfi.hpp with
+  version macros (0.1.0).
+- Tests: 49 doctest cases / 560 assertions; 95 pytest tests including a
   pure-numpy reference of the full prediction pipeline over all 48
   frame×scaling×support×normalization combos, scipy RBFInterpolator
   cross-checks, an evaluator reference (prediction reference + merge +

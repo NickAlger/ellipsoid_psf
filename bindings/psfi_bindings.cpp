@@ -688,4 +688,98 @@ PYBIND11_MODULE(psfi, m)
              "yy"_a, "xx"_a, "num_threads"_a = 0, py::call_guard<py::gil_scoped_release>(),
              "Block [Phi(yy[i], xx[j])]_{ij} of shape (num_y, num_x), evaluated in\n"
              "parallel; yy: (num_y, d), xx: (num_x, d). num_threads <= 0 uses all cores.");
+
+    // ------------------------------------------------------------------
+    //  Kernel low rank (the source/target <-> rows/cols adapter)
+    // ------------------------------------------------------------------
+
+    py::enum_<CompressionMethod>(m, "CompressionMethod",
+        "How to compress a kernel matrix: dense_svd assembles the dense matrix and\n"
+        "Frobenius-truncates its SVD (exact, superlinear cost); aca samples\n"
+        "O(rank * (num_targets + num_sources)) entries (the production path at\n"
+        "scale); automatic picks dense_svd when min(num_targets, num_sources) <=\n"
+        "dense_min_dim, else aca.")
+        .value("automatic", CompressionMethod::automatic)
+        .value("dense_svd", CompressionMethod::dense_svd)
+        .value("aca", CompressionMethod::aca);
+
+    py::class_<KernelLowRankOptions>(m, "KernelLowRankOptions",
+        "Options for kernel_low_rank(). The ACA knobs mirror ACAOptions\n"
+        "(recompression always on).")
+        .def(py::init([]( CompressionMethod method, int max_rank, int dense_min_dim,
+                          int num_threads, double aca_safety_factor,
+                          double recompress_safety_factor, int required_consecutive_successes,
+                          unsigned int seed )
+             {
+                 KernelLowRankOptions o;
+                 o.method = method;
+                 o.max_rank = max_rank;
+                 o.dense_min_dim = dense_min_dim;
+                 o.num_threads = num_threads;
+                 o.aca_safety_factor = aca_safety_factor;
+                 o.recompress_safety_factor = recompress_safety_factor;
+                 o.required_consecutive_successes = required_consecutive_successes;
+                 o.seed = seed;
+                 return o;
+             }),
+             "method"_a = CompressionMethod::automatic, "max_rank"_a = -1,
+             "dense_min_dim"_a = 128, "num_threads"_a = 0, "aca_safety_factor"_a = 0.25,
+             "recompress_safety_factor"_a = 0.75, "required_consecutive_successes"_a = 10,
+             "seed"_a = 0)
+        .def_readwrite("method", &KernelLowRankOptions::method)
+        .def_readwrite("max_rank", &KernelLowRankOptions::max_rank)
+        .def_readwrite("dense_min_dim", &KernelLowRankOptions::dense_min_dim)
+        .def_readwrite("num_threads", &KernelLowRankOptions::num_threads)
+        .def_readwrite("aca_safety_factor", &KernelLowRankOptions::aca_safety_factor)
+        .def_readwrite("recompress_safety_factor", &KernelLowRankOptions::recompress_safety_factor)
+        .def_readwrite("required_consecutive_successes",
+                       &KernelLowRankOptions::required_consecutive_successes)
+        .def_readwrite("seed", &KernelLowRankOptions::seed)
+        .def("__repr__", []( const KernelLowRankOptions& o )
+             {
+                 const char* method = ( o.method == CompressionMethod::automatic ) ? "automatic"
+                     : ( o.method == CompressionMethod::dense_svd ) ? "dense_svd" : "aca";
+                 return std::string("KernelLowRankOptions(method=") + method
+                     + ", max_rank=" + std::to_string(o.max_rank)
+                     + ", dense_min_dim=" + std::to_string(o.dense_min_dim)
+                     + ", num_threads=" + std::to_string(o.num_threads)
+                     + ", aca_safety_factor=" + std::to_string(o.aca_safety_factor)
+                     + ", recompress_safety_factor=" + std::to_string(o.recompress_safety_factor)
+                     + ", required_consecutive_successes="
+                     + std::to_string(o.required_consecutive_successes)
+                     + ", seed=" + std::to_string(o.seed) + ")";
+             });
+
+    py::class_<KernelLowRankResult>(m, "KernelLowRankResult",
+        "kernel_low_rank() result: factors (U rows = target points, V rows = source\n"
+        "points) plus diagnostics. Check hit_max_rank — a binding rank cap is never\n"
+        "silent.")
+        .def_readonly("factors", &KernelLowRankResult::factors)
+        .def_readonly("used_aca", &KernelLowRankResult::used_aca)
+        .def_readonly("converged", &KernelLowRankResult::converged)
+        .def_readonly("hit_max_rank", &KernelLowRankResult::hit_max_rank)
+        .def_readonly("relerr_estimate", &KernelLowRankResult::relerr_estimate)
+        .def("__repr__", []( const KernelLowRankResult& r )
+             {
+                 return "KernelLowRankResult(rank=" + std::to_string(r.factors.rank())
+                     + ", used_aca=" + ( r.used_aca ? "True" : "False" )
+                     + ", converged=" + ( r.converged ? "True" : "False" )
+                     + ", hit_max_rank=" + ( r.hit_max_rank ? "True" : "False" ) + ")";
+             });
+
+    m.def("kernel_low_rank",
+          []( const KernelEvaluator& kernel, const RowsXd& yy, const RowsXd& xx, double rtol,
+              const KernelLowRankOptions& options )
+          {
+              return kernel_low_rank(kernel, cols_from_rows(yy).eval(),
+                                     cols_from_rows(xx).eval(), rtol, options);
+          },
+          "kernel"_a, "yy"_a, "xx"_a, "rtol"_a, "options"_a = KernelLowRankOptions{},
+          py::call_guard<py::gil_scoped_release>(),
+          "Low-rank approximation of the kernel matrix [Phi(yy[i], xx[j])]_{ij} to\n"
+          "relative Frobenius tolerance rtol; yy: (num_targets, dim_target),\n"
+          "xx: (num_sources, dim_source). In the returned factors, U rows\n"
+          "correspond to targets and V rows to sources (target axis = matrix rows,\n"
+          "source axis = matrix columns, matching KernelEvaluator.block).\n"
+          "Deterministic for a given options.seed.");
 }
