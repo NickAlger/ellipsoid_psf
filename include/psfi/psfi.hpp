@@ -29,6 +29,7 @@
 // Umbrella header. Public headers are included here as they land:
 #include "psfi/config.hpp"                 // Frame, Scaling, Support, EvalConfig
 #include "psfi/moments.hpp"                // covariance hygiene: SPD eigenvalue clamping
+#include "psfi/low_rank.hpp"               // truncated SVD, ACA, randomized SVD, recompression
 #include "psfi/impulse_response_field.hpp" // sampled impulse responses + per-neighbor predictions
 #include "psfi/rbf.hpp"                    // RBF interpolation of scattered data
 #include "psfi/kernel_evaluator.hpp"       // Phi(y, x) entries and threaded blocks

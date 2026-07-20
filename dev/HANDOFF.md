@@ -2,7 +2,7 @@
 
 Working notes for development. Committed during early development on purpose;
 will be cleaned up (or moved out of the repo) before release. Last updated:
-2026-07-19 (second session).
+2026-07-19 (third session).
 
 ## What this is
 
@@ -11,10 +11,14 @@ the localpsf paper (Alger, Hartland, Petra, Ghattas, *Point spread function
 approximation of high-rank Hessians...*, SISC 46(3) 2024, DOI
 10.1137/23M1584745, §5.3), generalized and cleaned. Scope: given impulse
 response batches on a CG1 simplex mesh + per-sample/field moments + target
-points, evaluate the approximate integral kernel anywhere. Out of scope by
-design: applying the operator (moments/Dirac combs stay in consuming
-projects) and downstream compressed formats (H-matrix, BRLR, block row
-dense). The original research code lives in
+points, evaluate the approximate integral kernel anywhere — plus (added
+third session) the downstream compressed-matrix formats built from it:
+dense, global low rank, and source-partitioned block low rank (BRLR), with
+their apply/applyT matvecs. Out of scope by design: applying the operator
+(moments/Dirac combs stay in consuming projects), mass matrices/quadrature
+(the compressed objects hold pure kernel values at points; consumers apply
+A ≈ M_L Φ M_L per paper eq. 3.5), and MPI (format designed for it, no MPI
+code). The original research code lives in
 `hlibpro_python_wrapper/src/product_convolution_kernel.h` +
 `rbf_interpolation.h` (maintainer machine); this repo supersedes it.
 
@@ -64,16 +68,88 @@ pipeline, version single-sourced in `include/psfi/psfi.hpp`.
   near-duplicate centers (`duplicate_tol`, default 1e-7), then one RBF fit —
   same construction as the paper's FWD/ADJ merge.
 
+## Downstream-matrix design (agreed with Nick, 2026-07-19 third session)
+
+Pipeline being added: kernel eval (c) -> block row low rank matrix (d) ->
+matvecs/transpose matvecs (e), with dense and global-low-rank as baby steps
+and MPI-distributed BRLR later. Full prior-art survey (gaussian_psf,
+ymir-uqice antarctica, the paper's H-matrix chapter, gpsf-notes distributed
+design) done this session; bugs found in those repos are recorded in the
+project auto-memory (`brlr-downstream-context`), notably: gaussian_psf
+master cross.h:202 still has the signed-argmax ACA pivot bug (fixed only in
+the ymir-vendored copy — port from ymir-uqice, "probably full of bugs" is
+Nick's verdict on gaussian_psf).
+
+- **No "row"/"column" language in kernel-facing APIs** — Nick's chronic
+  which-is-which confusion traces to gaussian_psf silently transposing the
+  old convention. Kernel-facing code speaks source/target only: blocks
+  partition the SOURCE axis; `apply` integrates against source (u_src ->
+  v_tgt), `applyT` the reverse. Dictionary (docs, stated once): probed A
+  forward => apply ≈ A (nodal kernel sense), applyT ≈ A^T; probed A^T =>
+  swapped; symmetric mode => ≈ symmetric, consumer may form (apply+applyT)/2.
+  The GENERIC layer (low_rank.hpp) legitimately speaks matrix rows/cols; the
+  one adapter's fixed mapping is target=rows, source=cols, matching
+  `block(yy, xx)`.
+- **Support oracle pair** (drives the Omega_T,i target sets, exact w.r.t.
+  the psfi kernel because the gate makes it truly zero outside):
+  `target_support(x)` = ellipsoids in target space outside whose union
+  Phi(., x) vanishes (whitened_affine: exactly E(mu(x), Sigma(x), tau), one
+  ellipsoid; other frames: k ellipsoids from the kNN samples);
+  `source_support(y)` = same with roles swapped (row field). Symmetric mode
+  needs BOTH: block target set = targets in the union of block sources'
+  target_support, PLUS targets whose source_support contains a block source
+  (the row field gates on the transported x, so "x in y's ellipsoid" entries
+  exist that forward ellipsoids miss). Two etree::EllipsoidTree passes.
+  Support::none => full-width blocks. Block sparsity is LOSSLESS relative to
+  the psfi kernel => testable invariant (kernel == 0 outside computed sets).
+- **Partition = plain data** (vector of source-index sets), default
+  recursive coordinate bisection over source coordinates with a size cutoff;
+  cutoff is an experimentation knob (GPSF's 32 is NOT a recommendation —
+  production heuristic: block diameter ≈ a few ellipsoid widths, C≈5;
+  Nick's future idea: partition by ellipsoid width to uniformize rank).
+- **One container** (`BlockLowRank`): per block, global source_ids +
+  target_ids + either factors (target_factor, source_factor) or a verbatim
+  dense block, chosen automatically at the storage/flop break-even
+  r(|S|+|T|) < |S||T|. apply = gather/GEMV/scatter-add (targets overlap),
+  applyT reverse (sources disjoint). Container is pure linear algebra (ids +
+  factors + sizes; no geometry) — matches the gpsf-notes R_a/C_a distributed
+  design so the MPI step later is deal-blocks + two scatters.
+- **ACA+ is the production path** (asymptotics: balanced blocks + bounded
+  rank => O(rN) entries touched; dense-per-block is superlinear under
+  refinement); dense+thin-SVD is the small-block/reference path. Per-block
+  `method: auto | dense_svd | aca` with auto = size threshold. Random
+  restarts kept for barely-connected block supports (Pine Island Bay).
+- **Tolerances**: rtol = relative Frobenius everywhere (ACA increment rule
+  and SVD tail rule unified; GPSF mixed spectral and Frobenius). Per-block
+  relative; source-disjointness makes block errors compose globally.
+- **Determinism**: all randomness from seeded std::mt19937 raw output only
+  (no std distributions — implementation-defined across stdlibs); explicit
+  seed in options, default 0.
+- **Mass weights**: out for this version; per-point weights are a parked
+  idea if weighted truncation is ever needed.
+- Agreed slicing: (1) low_rank.hpp generic tools [DONE], (2) global low rank
+  from the evaluator, (3) partition + support oracles + target-set builder,
+  (4) BlockLowRank container + builder + tests (BRLR-vs-dense, adjoint,
+  1D->2D, support exactness), (5) BRLR -> GLR via randomized_svd, (6) docs
+  example + MPI design notes, (7) column-major eval perf slice (amortize
+  locate/fields/kNN/RBF-factorization per source point; the RBF weight
+  vector depends only on centers, so per-y cost drops to gate + mesh locate
+  + dot; excluded-neighbor edge cases fall back to per-y solves).
+
 ## State (all pushed to main, CI fully green)
 
 - `include/psfi/`: config.hpp, impulse_response_field.hpp, moments.hpp
-  (clamp_spd), rbf.hpp, kernel_evaluator.hpp; umbrella psfi.hpp with version
-  macros (0.1.0).
-- Tests: 30 doctest cases / ~420 assertions; 84 pytest tests including a
+  (clamp_spd), low_rank.hpp (truncated_svd, recompress, aca, randomized_svd
+  — slice 1 of the downstream-matrix work, all Frobenius-rtol, deterministic
+  seeds, ACAResult diagnostics incl. hit_max_rank), rbf.hpp,
+  kernel_evaluator.hpp; umbrella psfi.hpp with version macros (0.1.0).
+- Tests: 44 doctest cases / 528 assertions; 92 pytest tests including a
   pure-numpy reference of the full prediction pipeline over all 48
   frame×scaling×support×normalization combos, scipy RBFInterpolator
-  cross-checks, and an evaluator reference (prediction reference + merge +
-  scipy-checked RBF).
+  cross-checks, an evaluator reference (prediction reference + merge +
+  scipy-checked RBF), and numpy cross-checks of the low-rank tools
+  (Frobenius truncation rule recomputed independently; ACA disconnected
+  block-diagonal support test).
 - Bindings: module `psfi` (dist name `psf-interpolation`, free on PyPI, NOT
   yet published); points-are-rows convention like etree; field holder is
   shared_ptr (evaluators keep fields alive).
@@ -135,6 +211,10 @@ shows k=1 vs k=10 maps.
 
 ## Remaining work (rough order)
 
+0. **Downstream-matrix slices 2-7** (see the design section above): global
+   low rank from the evaluator; partition + support oracles; BlockLowRank
+   container/builder; BRLR->GLR; docs example + MPI notes; column-major eval
+   (absorbs old item 5 below).
 1. **API docs**: Doxygen + GitHub Pages, mirroring etree
    (`docs/Doxyfile`, doxygen-awesome theme, deploy workflow). Public API
    prose already lives as `///` comments.

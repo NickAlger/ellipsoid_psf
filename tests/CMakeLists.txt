@@ -5,6 +5,7 @@ add_executable(psfi_tests
     test_dimensions.cpp
     test_source_target.cpp
     test_moments.cpp
+    test_low_rank.cpp
     test_rbf.cpp
     test_kernel_evaluator.cpp)
 target_link_libraries(psfi_tests PRIVATE psfi::psfi)

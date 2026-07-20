@@ -14,6 +14,7 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/eigen.h>
+#include <pybind11/functional.h>
 #include <pybind11/stl.h>
 
 #include "psfi/psfi.hpp"
@@ -432,6 +433,155 @@ PYBIND11_MODULE(psfi, m)
           },
           "Sigmas"_a, "floor"_a, clamp_spd_doc);
     m.def("clamp_spd", clamp_stack, "Sigmas"_a, "floor"_a, clamp_spd_doc);
+
+    // ------------------------------------------------------------------
+    //  Low-rank tools
+    // ------------------------------------------------------------------
+    // Generic matrix layer: plain rows/columns, no source/target semantics
+    // (see the low_rank.hpp file header). Matrices pass through unchanged —
+    // the points-are-rows transposition does not apply here.
+
+    py::class_<LowRank>(m, "LowRank",
+        "Rank-r factorization A ~ U @ V.T with U (num_rows, r), V (num_cols, r).\n"
+        "Scale is folded into U; V is orthonormal when produced by\n"
+        "truncated_svd / recompress / randomized_svd.")
+        .def(py::init([]( const Eigen::MatrixXd& U, const Eigen::MatrixXd& V )
+             {
+                 if ( U.cols() != V.cols() )
+                 {
+                     throw std::invalid_argument("LowRank: U and V must have the same number "
+                                                 "of columns (the rank)");
+                 }
+                 return LowRank{ U, V };
+             }),
+             "U"_a, "V"_a)
+        .def_readwrite("U", &LowRank::U)
+        .def_readwrite("V", &LowRank::V)
+        .def_property_readonly("rank", &LowRank::rank)
+        .def("to_dense", &LowRank::to_dense, "The dense matrix U @ V.T.")
+        .def("__repr__", []( const LowRank& F )
+             {
+                 return "LowRank(num_rows=" + std::to_string(F.U.rows())
+                     + ", num_cols=" + std::to_string(F.V.rows())
+                     + ", rank=" + std::to_string(F.rank()) + ")";
+             });
+
+    m.def("truncated_svd",
+          []( const Eigen::MatrixXd& A, double rtol, int max_rank )
+          { return truncated_svd(A, rtol, max_rank); },
+          "A"_a, "rtol"_a, "max_rank"_a = -1,
+          py::call_guard<py::gil_scoped_release>(),
+          "Best approximation with the smallest rank whose discarded singular-value\n"
+          "tail satisfies ||tail||_F <= rtol * ||A||_F, capped at max_rank\n"
+          "(max_rank < 0 means no cap).");
+
+    m.def("recompress",
+          []( const LowRank& F, double rtol, int max_rank )
+          { return recompress(F, rtol, max_rank); },
+          "factors"_a, "rtol"_a, "max_rank"_a = -1,
+          py::call_guard<py::gil_scoped_release>(),
+          "Recompresses a (possibly redundant) factorization to the smallest rank\n"
+          "meeting the relative Frobenius tolerance.");
+
+    py::class_<ACAOptions>(m, "ACAOptions",
+        "Options for aca(). The stopping tolerance is aca_safety_factor * rtol and\n"
+        "the recompression tolerance recompress_safety_factor * rtol.")
+        .def(py::init([]( int max_rank, double aca_safety_factor, double recompress_safety_factor,
+                          int required_consecutive_successes, bool recompress, unsigned int seed )
+             {
+                 ACAOptions o;
+                 o.max_rank = max_rank;
+                 o.aca_safety_factor = aca_safety_factor;
+                 o.recompress_safety_factor = recompress_safety_factor;
+                 o.required_consecutive_successes = required_consecutive_successes;
+                 o.recompress = recompress;
+                 o.seed = seed;
+                 return o;
+             }),
+             "max_rank"_a = -1, "aca_safety_factor"_a = 0.25, "recompress_safety_factor"_a = 0.75,
+             "required_consecutive_successes"_a = 10, "recompress"_a = true, "seed"_a = 0)
+        .def_readwrite("max_rank", &ACAOptions::max_rank)
+        .def_readwrite("aca_safety_factor", &ACAOptions::aca_safety_factor)
+        .def_readwrite("recompress_safety_factor", &ACAOptions::recompress_safety_factor)
+        .def_readwrite("required_consecutive_successes", &ACAOptions::required_consecutive_successes)
+        .def_readwrite("recompress", &ACAOptions::recompress)
+        .def_readwrite("seed", &ACAOptions::seed)
+        .def("__repr__", []( const ACAOptions& o )
+             {
+                 return "ACAOptions(max_rank=" + std::to_string(o.max_rank)
+                     + ", aca_safety_factor=" + std::to_string(o.aca_safety_factor)
+                     + ", recompress_safety_factor=" + std::to_string(o.recompress_safety_factor)
+                     + ", required_consecutive_successes="
+                     + std::to_string(o.required_consecutive_successes)
+                     + ", recompress=" + ( o.recompress ? "True" : "False" )
+                     + ", seed=" + std::to_string(o.seed) + ")";
+             });
+
+    py::class_<ACAResult>(m, "ACAResult",
+        "aca() result: factors plus construction diagnostics. Check hit_max_rank —\n"
+        "never let a rank cap bind silently.")
+        .def_readonly("factors", &ACAResult::factors)
+        .def_readonly("sampled_rows", &ACAResult::sampled_rows)
+        .def_readonly("sampled_cols", &ACAResult::sampled_cols)
+        .def_readonly("sampled_rank", &ACAResult::sampled_rank)
+        .def_readonly("converged", &ACAResult::converged)
+        .def_readonly("hit_max_rank", &ACAResult::hit_max_rank)
+        .def_readonly("relerr_estimate", &ACAResult::relerr_estimate)
+        .def("__repr__", []( const ACAResult& r )
+             {
+                 return "ACAResult(rank=" + std::to_string(r.factors.rank())
+                     + ", sampled_rank=" + std::to_string(r.sampled_rank)
+                     + ", converged=" + ( r.converged ? "True" : "False" )
+                     + ", hit_max_rank=" + ( r.hit_max_rank ? "True" : "False" ) + ")";
+             });
+
+    m.def("aca",
+          []( const std::function<Eigen::VectorXd(int)>& get_row,
+              const std::function<Eigen::VectorXd(int)>& get_col,
+              int num_rows, int num_cols, double rtol, const ACAOptions& options )
+          { return aca(get_row, get_col, num_rows, num_cols, rtol, options); },
+          "get_row"_a, "get_col"_a, "num_rows"_a, "num_cols"_a, "rtol"_a,
+          "options"_a = ACAOptions{},
+          "Adaptive cross approximation with partial pivoting and random-restart\n"
+          "verification (the GPSF/ymir 'ACA+'). get_row(i) must return row i and\n"
+          "get_col(j) column j of the same fixed matrix; only sampled rows and\n"
+          "columns are ever evaluated. rtol = 0 runs to exact recovery.\n"
+          "Deterministic for a given options.seed.");
+
+    py::class_<RSVDOptions>(m, "RSVDOptions", "Options for randomized_svd().")
+        .def(py::init([]( int oversampling, int power_iterations, double rtol, unsigned int seed )
+             {
+                 RSVDOptions o;
+                 o.oversampling = oversampling;
+                 o.power_iterations = power_iterations;
+                 o.rtol = rtol;
+                 o.seed = seed;
+                 return o;
+             }),
+             "oversampling"_a = 10, "power_iterations"_a = 1, "rtol"_a = 0.0, "seed"_a = 0)
+        .def_readwrite("oversampling", &RSVDOptions::oversampling)
+        .def_readwrite("power_iterations", &RSVDOptions::power_iterations)
+        .def_readwrite("rtol", &RSVDOptions::rtol)
+        .def_readwrite("seed", &RSVDOptions::seed)
+        .def("__repr__", []( const RSVDOptions& o )
+             {
+                 return "RSVDOptions(oversampling=" + std::to_string(o.oversampling)
+                     + ", power_iterations=" + std::to_string(o.power_iterations)
+                     + ", rtol=" + std::to_string(o.rtol)
+                     + ", seed=" + std::to_string(o.seed) + ")";
+             });
+
+    m.def("randomized_svd",
+          []( const std::function<Eigen::MatrixXd(const Eigen::Ref<const Eigen::MatrixXd>&)>& apply,
+              const std::function<Eigen::MatrixXd(const Eigen::Ref<const Eigen::MatrixXd>&)>& apply_transpose,
+              int num_rows, int num_cols, int max_rank, const RSVDOptions& options )
+          { return randomized_svd(apply, apply_transpose, num_rows, num_cols, max_rank, options); },
+          "apply"_a, "apply_transpose"_a, "num_rows"_a, "num_cols"_a, "max_rank"_a,
+          "options"_a = RSVDOptions{},
+          "Randomized SVD of a matrix available only through its action:\n"
+          "apply(X) = A @ X on (num_cols, k) blocks, apply_transpose(Y) = A.T @ Y on\n"
+          "(num_rows, k) blocks. Roughly the best rank-max_rank approximation;\n"
+          "deterministic for a given options.seed.");
 
     // ------------------------------------------------------------------
     //  RBF interpolation
