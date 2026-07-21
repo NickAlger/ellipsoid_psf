@@ -732,3 +732,28 @@ TEST_CASE("ImpulseResponseField: deferred kd-tree rebuild")
     F.rebuild_kdtree();
     CHECK(F.predictions(y, x, cfg).size() == 1);
 }
+
+
+TEST_CASE("ImpulseResponseField: nearest_sample_distance")
+{
+    Eigen::MatrixXd vertices;
+    Eigen::MatrixXi cells;
+    make_grid_mesh(4, vertices, cells);
+    ImpulseResponseField F(vertices, cells, /*batches_normalized=*/false);
+
+    // No samples yet: infinity.
+    const Eigen::Vector2d q(0.30, 0.40);
+    CHECK(std::isinf(F.nearest_sample_distance(q)));
+
+    Eigen::MatrixXd P(2, 2);
+    P.col(0) = Eigen::Vector2d(0.25, 0.25);
+    P.col(1) = Eigen::Vector2d(0.75, 0.75);
+    F.add_batch(P, Eigen::VectorXd::Ones(vertices.cols()),
+                Eigen::VectorXd(), Eigen::MatrixXd(), {});
+
+    CHECK(F.nearest_sample_distance(P.col(0)) == 0.0);
+    CHECK(F.nearest_sample_distance(Eigen::Vector2d(0.25, 0.35))
+          == doctest::Approx(0.10).epsilon(1e-13));
+    CHECK(F.nearest_sample_distance(Eigen::Vector2d(0.80, 0.75))
+          == doctest::Approx(0.05).epsilon(1e-13));
+}

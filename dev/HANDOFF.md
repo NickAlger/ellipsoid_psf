@@ -85,6 +85,23 @@ pipeline, version single-sourced in `include/ellipsoid_psf/ellipsoid_psf.hpp`.
   field at (x,y)) predictions in displacement coordinates, averaging
   near-duplicate centers (`duplicate_tol`, default 1e-7), then one RBF fit —
   same construction as the paper's FWD/ADJ merge.
+- **`SymmetricCombine::crisscross`** (added 2026-07-20, Nick's design, from the
+  PIG experiment where pooled symmetric mode consistently LOST to cols-only by
+  blending well- and poorly-informed predictions in one fit): per entry
+  Phi(y,x), SELECT the forward (column) interpolation when x is closer to a
+  col-field sample than y is to a row-field sample, the adjoint (row)
+  interpolation when y is closer; average both on ties. Fits stay pure, known
+  columns/rows form an exact criss-cross lattice, and with the same field
+  passed twice the result is exactly symmetric by construction (doctest
+  verifies bitwise). New `EvalConfig::symmetric_combine` (default `pooled`),
+  `ImpulseResponseField::nearest_sample_distance()`, one-sided evaluation
+  refactored into `KernelEvaluator::evaluate_side`, and `block()` runs the
+  fixed-source fast path once per side + per-entry selection (pooled mode
+  still evaluates entrywise). `block_target_sets` unchanged: the pooled
+  forward+adjoint union remains a (possibly non-tight) superset of the
+  crisscross support, so block sparsity stays lossless. PIG numbers (research
+  repo `ellipsoid_psf_pig/`): crisscross 0.416 vs pooled-postsym 0.421 vs
+  cols 0.439 white-input operator error; its real wins are structural.
 
 ## Downstream-matrix design (agreed with Nick, 2026-07-19 third session)
 

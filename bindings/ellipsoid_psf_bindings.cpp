@@ -175,6 +175,16 @@ const char* support_name( Support s )
     return "?";
 }
 
+const char* symmetric_combine_name( SymmetricCombine s )
+{
+    switch ( s )
+    {
+        case SymmetricCombine::pooled:     return "pooled";
+        case SymmetricCombine::crisscross: return "crisscross";
+    }
+    return "?";
+}
+
 const char* kernel_name( RBFKernel k )
 {
     switch ( k )
@@ -223,10 +233,20 @@ PYBIND11_MODULE(ellipsoid_psf, m)
         .value("none", Support::none, "no gate")
         .value("ellipsoid", Support::ellipsoid, "f_i = 0 outside E_i(tau)");
 
+    py::enum_<SymmetricCombine>(m, "SymmetricCombine",
+        "How symmetric mode combines the forward and adjoint prediction sets.")
+        .value("pooled", SymmetricCombine::pooled,
+               "pool both sets into one RBF fit (paper construction)")
+        .value("crisscross", SymmetricCombine::crisscross,
+               "select the better-informed side per entry (nearest-sample distance); "
+               "ties average; symmetric by construction with the same field twice");
+
     py::class_<EvalConfig>(m, "EvalConfig",
-        "Evaluation configuration: frame map, scaling, support gate, tau, num_neighbors.\n"
-        "Different configurations require different data; see ImpulseResponseField.validate.")
-        .def(py::init([]( Frame frame, Scaling scaling, Support support, double tau, int num_neighbors )
+        "Evaluation configuration: frame map, scaling, support gate, tau, num_neighbors,\n"
+        "symmetric_combine. Different configurations require different data; see\n"
+        "ImpulseResponseField.validate.")
+        .def(py::init([]( Frame frame, Scaling scaling, Support support, double tau,
+                          int num_neighbors, SymmetricCombine symmetric_combine )
              {
                  EvalConfig cfg;
                  cfg.frame = frame;
@@ -234,22 +254,26 @@ PYBIND11_MODULE(ellipsoid_psf, m)
                  cfg.support = support;
                  cfg.tau = tau;
                  cfg.num_neighbors = num_neighbors;
+                 cfg.symmetric_combine = symmetric_combine;
                  return cfg;
              }),
              "frame"_a = Frame::mean_translation, "scaling"_a = Scaling::volume,
-             "support"_a = Support::ellipsoid, "tau"_a = 3.0, "num_neighbors"_a = 10)
+             "support"_a = Support::ellipsoid, "tau"_a = 3.0, "num_neighbors"_a = 10,
+             "symmetric_combine"_a = SymmetricCombine::pooled)
         .def_readwrite("frame", &EvalConfig::frame)
         .def_readwrite("scaling", &EvalConfig::scaling)
         .def_readwrite("support", &EvalConfig::support)
         .def_readwrite("tau", &EvalConfig::tau)
         .def_readwrite("num_neighbors", &EvalConfig::num_neighbors)
+        .def_readwrite("symmetric_combine", &EvalConfig::symmetric_combine)
         .def("__repr__", []( const EvalConfig& c )
              {
                  return std::string("EvalConfig(frame=") + frame_name(c.frame)
                      + ", scaling=" + scaling_name(c.scaling)
                      + ", support=" + support_name(c.support)
                      + ", tau=" + std::to_string(c.tau)
-                     + ", num_neighbors=" + std::to_string(c.num_neighbors) + ")";
+                     + ", num_neighbors=" + std::to_string(c.num_neighbors)
+                     + ", symmetric_combine=" + symmetric_combine_name(c.symmetric_combine) + ")";
              });
 
     py::class_<ImpulseResponseField, std::shared_ptr<ImpulseResponseField>>(m, "ImpulseResponseField",

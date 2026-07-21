@@ -51,6 +51,7 @@
 /// geometry/value-separation invariant that keeps it cheap.
 
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -160,6 +161,19 @@ public:
             P.col(ii) = sample_points_[ii];
         }
         return P;
+    }
+    /// Euclidean distance from x to the nearest sample point (+infinity when
+    /// the field has no samples). Drives the per-entry side selection of
+    /// SymmetricCombine::crisscross.
+    double nearest_sample_distance( const Eigen::Ref<const Eigen::VectorXd>& x ) const
+    {
+        if ( num_sample_points() == 0 )
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+        Eigen::MatrixXd xq(dim_source_, 1);
+        xq.col(0) = x;
+        return std::sqrt(kdtree_.query(xq, 1, 1).second(0, 0));
     }
     /// Per-sample masses V_i (empty if absent).
     const std::vector<double>& sample_V() const                 { return sample_V_; }

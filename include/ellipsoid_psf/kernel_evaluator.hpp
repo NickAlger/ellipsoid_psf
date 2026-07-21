@@ -11,10 +11,18 @@
 /// "columns" of the kernel, sampled in x). Symmetric mode additionally takes
 /// a row field probed with the transpose operator: since
 /// Phi(y, x) = Phi^T(x, y), the row field's predictions at (x, y) predict the
-/// same kernel entry from samples near y. Both prediction sets are pooled in
-/// displacement coordinates (sample point minus its query point, so the
-/// evaluation point is the origin), near-duplicate centers are averaged, and
-/// one RBF interpolation combines them — following the paper's construction.
+/// same kernel entry from samples near y. Two combine rules
+/// (EvalConfig::symmetric_combine):
+///   - SymmetricCombine::pooled — both prediction sets are pooled in
+///     displacement coordinates (sample point minus its query point, so the
+///     evaluation point is the origin), near-duplicate centers are averaged,
+///     and one RBF interpolation combines them — the paper's construction.
+///   - SymmetricCombine::crisscross — one side is SELECTED per entry: the
+///     forward (column) interpolation when x is closer to a col-field sample
+///     than y is to a row-field sample, the adjoint (row) interpolation when
+///     y is closer, the average of both on ties. Fits stay pure, known
+///     columns/rows form an exact criss-cross lattice, and with the same
+///     field passed twice the result is exactly symmetric by construction.
 ///
 /// There is no special case snapping evaluations onto known columns: with
 /// smoothing = 0 the RBF interpolant reproduces its centers, so
@@ -82,6 +90,12 @@ public:
             }
             row_field_->validate(config_);
         }
+        if ( !row_field_ && config_.symmetric_combine == SymmetricCombine::crisscross )
+        {
+            throw std::invalid_argument("ellipsoid_psf::KernelEvaluator: SymmetricCombine::crisscross "
+                                        "requires symmetric mode (a row field); pass the same field "
+                                        "twice for a symmetric operator probed once");
+        }
         if ( !( duplicate_tol_ >= 0.0 ) )
         {
             throw std::invalid_argument("ellipsoid_psf::KernelEvaluator: duplicate_tol must be >= 0");
@@ -104,6 +118,27 @@ public:
     double operator()( const Eigen::Ref<const Eigen::VectorXd>& y,
                        const Eigen::Ref<const Eigen::VectorXd>& x ) const
     {
+        if ( row_field_ && config_.symmetric_combine == SymmetricCombine::crisscross )
+        {
+            const double dx = col_field_->nearest_sample_distance(x);
+            const double dy = row_field_->nearest_sample_distance(y);
+            if ( dx < dy )
+            {
+                return evaluate_side(*col_field_, y, x);
+            }
+            if ( dy < dx )
+            {
+                return evaluate_side(*row_field_, x, y);
+            }
+            return 0.5 * ( evaluate_side(*col_field_, y, x)
+                           + evaluate_side(*row_field_, x, y) );
+        }
+
+        if ( !row_field_ )
+        {
+            return evaluate_side(*col_field_, y, x);
+        }
+
         // Pool predictions in displacement coordinates (evaluation point at
         // the origin): forward centers x_i - x, adjoint centers x_j - y.
         std::vector<Eigen::VectorXd> centers;
@@ -114,7 +149,6 @@ public:
             centers.push_back(p.point - x);
             values.push_back(p.value);
         }
-        if ( row_field_ )
         {
             const int num_fwd = static_cast<int>(centers.size());
             for ( const Prediction& p : row_field_->predictions(x, y, config_) )
@@ -185,9 +219,11 @@ public:
     /// centers do not depend on the target), cached per exclusion pattern —
     /// so each additional target costs a gate test, a mesh lookup, and a dot
     /// product. Results agree with entrywise operator() up to rounding.
-    /// Symmetric mode pools row-field predictions looked up near each
+    /// Pooled symmetric mode pools row-field predictions looked up near each
     /// target, which breaks the fixed-center structure, and evaluates
-    /// entrywise.
+    /// entrywise. Crisscross symmetric mode runs the fixed-source fast path
+    /// once per side (columns as-is, rows on the transposed roles) and
+    /// selects per entry by the nearest-sample distances.
     Eigen::MatrixXd block( const Eigen::Ref<const Eigen::MatrixXd>& yy, // (dim_target, num_y)
                            const Eigen::Ref<const Eigen::MatrixXd>& xx, // (dim_source, num_x)
                            int num_threads = 0 ) const
@@ -201,7 +237,34 @@ public:
         const int nx = static_cast<int>(xx.cols());
         Eigen::MatrixXd out(ny, nx);
 
+        const bool crisscross =
+            row_field_ && config_.symmetric_combine == SymmetricCombine::crisscross;
+
         // The fast path keys its weight cache on a 64-bit exclusion mask.
+        if ( crisscross && config_.num_neighbors <= 63 )
+        {
+            const Eigen::MatrixXd A = block_one_sided(*col_field_, yy, xx, num_threads);
+            const Eigen::MatrixXd B = block_one_sided(*row_field_, xx, yy, num_threads);
+            Eigen::VectorXd dx(nx), dy(ny);
+            for ( int jj = 0; jj < nx; ++jj )
+            {
+                dx(jj) = col_field_->nearest_sample_distance(xx.col(jj));
+            }
+            for ( int ii = 0; ii < ny; ++ii )
+            {
+                dy(ii) = row_field_->nearest_sample_distance(yy.col(ii));
+            }
+            for ( int jj = 0; jj < nx; ++jj )
+            {
+                for ( int ii = 0; ii < ny; ++ii )
+                {
+                    out(ii, jj) = ( dx(jj) < dy(ii) ) ? A(ii, jj)
+                                : ( dy(ii) < dx(jj) ) ? B(jj, ii)
+                                : 0.5 * ( A(ii, jj) + B(jj, ii) );
+                }
+            }
+            return out;
+        }
         if ( row_field_ || config_.num_neighbors > 63 )
         {
             ellipsoid_tree::detail::parallel_for(0, static_cast<std::ptrdiff_t>(ny) * nx,
@@ -217,14 +280,67 @@ public:
             return out;
         }
 
+        return block_one_sided(*col_field_, yy, xx, num_threads);
+    }
+
+private:
+    /// One-sided entry evaluation: RBF-combine one field's predictions with
+    /// centers p.point - source, evaluated at the origin. The cols-only entry
+    /// is evaluate_side(*col_field_, y, x); the adjoint (row) side of
+    /// crisscross is evaluate_side(*row_field_, x, y).
+    double evaluate_side( const ImpulseResponseField& field,
+                          const Eigen::Ref<const Eigen::VectorXd>& target,
+                          const Eigen::Ref<const Eigen::VectorXd>& source ) const
+    {
+        const std::vector<Prediction> preds = field.predictions(target, source, config_);
+        const int k = static_cast<int>(preds.size());
+        if ( k == 0 )
+        {
+            return 0.0;
+        }
+        // Far-field short circuit (see operator() comment).
+        bool all_zero = true;
+        for ( const Prediction& p : preds )
+        {
+            if ( p.value != 0.0 )
+            {
+                all_zero = false;
+                break;
+            }
+        }
+        if ( all_zero )
+        {
+            return 0.0;
+        }
+        const int d = field.dim_source();
+        Eigen::MatrixXd C(d, k);
+        Eigen::VectorXd f(k);
+        for ( int jj = 0; jj < k; ++jj )
+        {
+            C.col(jj) = preds[jj].point - source;
+            f(jj) = preds[jj].value;
+        }
+        return rbf_interpolate(f, C, Eigen::MatrixXd::Zero(d, 1), rbf_)(0);
+    }
+
+    /// The fixed-source fast path for one field (see block() docs); shape
+    /// (num_targets, num_sources) with targets/sources in that field's roles.
+    Eigen::MatrixXd block_one_sided( const ImpulseResponseField& field,
+                                     const Eigen::Ref<const Eigen::MatrixXd>& yy,
+                                     const Eigen::Ref<const Eigen::MatrixXd>& xx,
+                                     int num_threads ) const
+    {
+        const int ny = static_cast<int>(yy.cols());
+        const int nx = static_cast<int>(xx.cols());
+        Eigen::MatrixXd out(ny, nx);
         ellipsoid_tree::detail::parallel_for(0, nx,
             [&]( std::ptrdiff_t aa, std::ptrdiff_t bb )
             {
-                const Eigen::VectorXd origin = Eigen::VectorXd::Zero(dim_source());
+                const Eigen::VectorXd origin = Eigen::VectorXd::Zero(field.dim_source());
                 for ( std::ptrdiff_t jj = aa; jj < bb; ++jj )
                 {
                     const ImpulseResponseField::PredictionSweep sweep =
-                        col_field_->predictions_over_targets(yy, xx.col(jj), config_);
+                        field.predictions_over_targets(yy, xx.col(jj), config_);
                     const int k = static_cast<int>(sweep.sample_indices.size());
                     if ( k == 0 )
                     {
@@ -270,7 +386,7 @@ public:
                         if ( !weights )
                         {
                             int active = 0;
-                            Eigen::MatrixXd C(dim_source(), k);
+                            Eigen::MatrixXd C(field.dim_source(), k);
                             for ( int nn = 0; nn < k; ++nn )
                             {
                                 if ( !( mask & ( std::uint64_t(1) << nn ) ) )
@@ -299,6 +415,7 @@ public:
         return out;
     }
 
+public:
     /// Ellipsoids (unit scale, tau folded in) covering the support of the
     /// col-field contribution to the kernel column Phi(., x): those
     /// predictions vanish for y outside the union. In cols-only mode this

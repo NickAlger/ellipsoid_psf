@@ -234,3 +234,94 @@ TEST_CASE("KernelEvaluator: construction validates everything up front")
     auto F1d = std::make_shared<ImpulseResponseField>(verts1d, cells1d, false);
     CHECK_THROWS_AS(KernelEvaluator(F, F1d, translation_config(3)), std::invalid_argument);
 }
+
+
+TEST_CASE("KernelEvaluator: crisscross is symmetric by construction")
+{
+    auto F = make_simple_field();
+    EvalConfig cfg = translation_config(3);
+    cfg.symmetric_combine = SymmetricCombine::crisscross;
+    KernelEvaluator K(F, F, cfg);
+
+    // Entrywise: swapping the arguments swaps the selected side, so the two
+    // evaluations run the identical one-sided computation -> exact equality.
+    const std::vector<Eigen::Vector2d> pts = {{0.31, 0.44}, {0.52, 0.57}, {0.44, 0.39},
+                                              {0.61, 0.50}, {0.30, 0.40}, {0.55, 0.50}};
+    for ( std::size_t a = 0; a < pts.size(); ++a )
+    {
+        for ( std::size_t b = 0; b < pts.size(); ++b )
+        {
+            CHECK(K(pts[a], pts[b]) == K(pts[b], pts[a])); // exact, ties included
+        }
+    }
+
+    // Block path: same property, and the matrix is exactly symmetric.
+    Eigen::MatrixXd P(2, pts.size());
+    for ( std::size_t a = 0; a < pts.size(); ++a )
+    {
+        P.col(a) = pts[a];
+    }
+    const Eigen::MatrixXd B = K.block(P, P, 2);
+    CHECK(( B - B.transpose() ).cwiseAbs().maxCoeff() == 0.0);
+}
+
+
+TEST_CASE("KernelEvaluator: crisscross selects the nearer side")
+{
+    auto F = make_simple_field();
+    EvalConfig cfg = translation_config(3);
+    cfg.symmetric_combine = SymmetricCombine::crisscross;
+    KernelEvaluator K_cc(F, F, cfg);
+    KernelEvaluator K_cols(F, nullptr, translation_config(3));
+
+    // Source exactly at a sample point (distance 0), target not a sample:
+    // the column side must be selected, matching cols-only exactly.
+    const Eigen::Vector2d xs(0.30, 0.40);   // sample point of make_simple_field
+    const Eigen::Vector2d y(0.48, 0.53);    // not a sample
+    CHECK(K_cc(y, xs) == K_cols(y, xs));
+
+    // Target exactly at a sample point, source not: the row side must be
+    // selected, which by symmetry of the construction equals the cols-only
+    // evaluation of the transposed entry.
+    CHECK(K_cc(xs, y) == K_cols(y, xs));
+
+    // Sample-to-sample entries tie (both distances zero) and average the two
+    // one-sided evaluations.
+    const Eigen::Vector2d xt(0.55, 0.50);   // another sample point
+    CHECK(K_cc(xt, xs) == 0.5 * ( K_cols(xt, xs) + K_cols(xs, xt) ));
+}
+
+
+TEST_CASE("KernelEvaluator: crisscross block matches entrywise evaluation")
+{
+    auto F = make_simple_field();
+    EvalConfig cfg = translation_config(3);
+    cfg.symmetric_combine = SymmetricCombine::crisscross;
+    KernelEvaluator K(F, F, cfg);
+
+    Eigen::MatrixXd yy(2, 5), xx(2, 4);
+    yy << 0.35, 0.45, 0.55, 0.30, 0.60,
+          0.40, 0.50, 0.50, 0.40, 0.45;   // includes sample points (ties exercised)
+    xx << 0.32, 0.55, 0.44, 0.58,
+          0.42, 0.50, 0.60, 0.48;
+
+    const Eigen::MatrixXd B1 = K.block(yy, xx, 1);
+    const Eigen::MatrixXd B4 = K.block(yy, xx, 4);
+    CHECK(( B1 - B4 ).cwiseAbs().maxCoeff() == 0.0);
+    for ( int jj = 0; jj < 4; ++jj )
+    {
+        for ( int ii = 0; ii < 5; ++ii )
+        {
+            CHECK(B1(ii, jj) == doctest::Approx(K(yy.col(ii), xx.col(jj))).epsilon(1e-13));
+        }
+    }
+}
+
+
+TEST_CASE("KernelEvaluator: crisscross requires a row field")
+{
+    auto F = make_simple_field();
+    EvalConfig cfg = translation_config(3);
+    cfg.symmetric_combine = SymmetricCombine::crisscross;
+    CHECK_THROWS_AS(KernelEvaluator(F, nullptr, cfg), std::invalid_argument);
+}

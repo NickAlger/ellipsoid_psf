@@ -67,6 +67,26 @@ enum class Support
     ellipsoid, ///< f_i = 0 when T_i(y) is outside E_i, tested before (and instead of) any mesh lookup
 };
 
+/// How symmetric mode (a row field alongside the col field) combines the two
+/// prediction sets for an entry Phi(y, x).
+enum class SymmetricCombine
+{
+    /// Pool forward (samples near x) and adjoint (samples near y) predictions
+    /// in displacement coordinates, average near-duplicate centers, and run
+    /// ONE RBF fit through the pooled set — the paper's construction.
+    pooled,
+    /// Select a side per entry instead of pooling: use the forward (column)
+    /// interpolation when x is closer to a col-field sample than y is to a
+    /// row-field sample, the adjoint (row) interpolation when y is closer,
+    /// and the average of both one-sided evaluations on ties. Each RBF fit
+    /// stays pure (no blending of well- and poorly-informed predictions),
+    /// known columns/rows are reproduced along an exact criss-cross lattice,
+    /// and for a symmetric operator probed once (same field passed twice)
+    /// the result is symmetric by construction: Phi(y, x) == Phi(x, y)
+    /// exactly, ties included.
+    crisscross,
+};
+
 /// Configuration for evaluating kernel predictions from an ImpulseResponseField.
 ///
 /// Different configurations require different data (see
@@ -81,6 +101,8 @@ struct EvalConfig
     Support support       = Support::ellipsoid;
     double  tau           = 3.0; ///< support ellipsoid scale (standard deviations); used when support == ellipsoid
     int     num_neighbors = 10;  ///< number of nearby sample points contributing predictions
+    /// Combine rule for symmetric mode; ignored in cols-only mode.
+    SymmetricCombine symmetric_combine = SymmetricCombine::pooled;
 };
 
 } // end namespace ellipsoid_psf
